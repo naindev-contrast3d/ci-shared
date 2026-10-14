@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import subprocess
 import sys
@@ -47,8 +48,12 @@ class FakeGithub:
         update_result="updated",
         fail_repos=(),
         merge_error=False,
+        queue=None,
+        queue_error=False,
     ):
         self.prs = prs or []
+        self.queue = queue or {}
+        self.queue_error = queue_error
         self.gate_ok = gate_ok
         self.sealed_shas = sealed
         self.behind = behind
@@ -65,6 +70,11 @@ class FakeGithub:
         if repo in self.fail_repos:
             raise subprocess.CalledProcessError(1, ["gh"], stderr="boom")
         return self.prs.get(repo, []) if isinstance(self.prs, dict) else self.prs
+
+    def queued_runs(self, repo):
+        if self.queue_error:
+            raise subprocess.CalledProcessError(1, ["gh"], stderr="queue boom")
+        return self.queue.get(repo, [])
 
     def gate_green(self, repo, sha, check_name):
         return self._answer(self.gate_ok, sha)
@@ -91,12 +101,100 @@ class FakeGithub:
         return [c for c in self.calls if c[0] != "open_prs"]
 
 
-def run(gh, repos=None, dry_run=False):
+def run(gh, repos=None, dry_run=False, alerts=None, now=None):
     logs = []
     settings = train.Settings()
     configs = repos or [train.RepoConfig(repo=REPO)]
-    code = train.run_cycle(gh, configs, settings, dry_run=dry_run, log=logs.append)
+    code = train.run_cycle(
+        gh, configs, settings, dry_run=dry_run, log=logs.append, alerts=alerts, now=now
+    )
     return code, logs
+
+
+NOW = dt.datetime(2026, 10, 14, 13, 0, 0, tzinfo=dt.UTC)
+
+
+def queued(run_id, minutes_ago, branch="feat/x", workflow="CI"):
+    created = NOW - dt.timedelta(minutes=minutes_ago)
+    return {
+        "databaseId": run_id,
+        "createdAt": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "headBranch": branch,
+        "workflowName": workflow,
+    }
+
+
+class QueueAlert(unittest.TestCase):
+    def state_path(self):
+        return Path(tempfile.mkdtemp()) / "queue-alerts.json"
+
+    def test_a_run_queued_longer_than_the_threshold_is_logged_with_its_details(self):
+        gh = FakeGithub(queue={REPO: [queued(77, 45, branch="feat/y", workflow="CI")]})
+        _, logs = run(gh, alerts=train.QueueAlerts(self.state_path()), now=NOW)
+        line = next(item for item in logs if "queued" in item)
+        for part in (REPO, "77", "feat/y", "CI", "45"):
+            self.assertIn(part, line)
+
+    def test_a_younger_run_is_not_logged(self):
+        gh = FakeGithub(queue={REPO: [queued(78, 5)]})
+        _, logs = run(gh, alerts=train.QueueAlerts(self.state_path()), now=NOW)
+        self.assertFalse(any("queued" in item for item in logs))
+
+    def test_the_same_run_is_logged_only_once_even_across_restarts(self):
+        path = self.state_path()
+        gh = FakeGithub(queue={REPO: [queued(79, 60)]})
+        _, first = run(gh, alerts=train.QueueAlerts(path), now=NOW)
+        _, again = run(gh, alerts=train.QueueAlerts(path), now=NOW)
+        self.assertEqual(sum("queued" in item for item in first), 1)
+        self.assertEqual(sum("queued" in item for item in again), 0)
+
+    def test_runs_that_left_the_queue_are_forgotten(self):
+        path = self.state_path()
+        run(
+            FakeGithub(queue={REPO: [queued(80, 60)]}),
+            alerts=train.QueueAlerts(path),
+            now=NOW,
+        )
+        run(FakeGithub(queue={REPO: []}), alerts=train.QueueAlerts(path), now=NOW)
+        self.assertNotIn("80", path.read_text(encoding="utf-8"))
+
+    def test_a_dry_run_logs_but_does_not_remember(self):
+        path = self.state_path()
+        gh = FakeGithub(queue={REPO: [queued(81, 60)]})
+        _, logs = run(gh, dry_run=True, alerts=train.QueueAlerts(path), now=NOW)
+        self.assertTrue(any("queued" in item for item in logs))
+        self.assertFalse(path.exists())
+
+    def test_the_alert_works_even_when_the_repository_has_no_open_pull_requests(self):
+        gh = FakeGithub(prs=[], queue={REPO: [queued(82, 90)]})
+        _, logs = run(gh, alerts=train.QueueAlerts(self.state_path()), now=NOW)
+        self.assertTrue(any("82" in item for item in logs))
+
+    def test_a_failing_queue_query_is_logged_and_does_not_stop_the_merge(self):
+        gh = FakeGithub(prs=[pr(3)], queue_error=True)
+        code, logs = run(gh, alerts=train.QueueAlerts(self.state_path()), now=NOW)
+        self.assertEqual(code, 0)
+        self.assertTrue(any("queue check failed" in item for item in logs))
+        self.assertEqual(gh.mutations(), [("merge", REPO, 3, SHA, "merge")])
+
+    def test_without_an_alerts_object_nothing_is_checked(self):
+        gh = FakeGithub(queue={REPO: [queued(83, 90)]})
+        _, logs = run(gh)
+        self.assertEqual(logs, [])
+
+    def test_the_threshold_comes_from_the_settings(self):
+        gh = FakeGithub(queue={REPO: [queued(84, 10)]})
+        logs = []
+        train.run_cycle(
+            gh,
+            [train.RepoConfig(repo=REPO)],
+            train.Settings(queue_alert_minutes=5),
+            dry_run=False,
+            log=logs.append,
+            alerts=train.QueueAlerts(self.state_path()),
+            now=NOW,
+        )
+        self.assertTrue(any("84" in item for item in logs))
 
 
 class DecisionRules(unittest.TestCase):
@@ -241,6 +339,18 @@ class Config(unittest.TestCase):
         self.assertFalse(repos[0].require_seal)
         self.assertEqual(repos[0].base, "main")
         self.assertEqual(repos[0].merge_method, "merge")
+        self.assertEqual(settings.queue_alert_minutes, 30)
+
+    def test_the_queue_alert_threshold_can_be_set_and_must_be_a_positive_integer(self):
+        settings, _ = train.load_config(
+            self.write({"queue_alert_minutes": 10, "repos": [{"repo": "o/r"}]})
+        )
+        self.assertEqual(settings.queue_alert_minutes, 10)
+        for bad in (0, -5, "10", 1.5, True):
+            with self.subTest(bad=bad), self.assertRaises(train.ConfigError):
+                train.load_config(
+                    self.write({"queue_alert_minutes": bad, "repos": [{"repo": "o/r"}]})
+                )
 
     def test_overrides_are_read(self):
         _, repos = train.load_config(
@@ -329,6 +439,15 @@ class RealGithubCommands(unittest.TestCase):
                 SHA,
             ],
         )
+
+    def test_queued_runs_asks_for_queued_status_and_parses_json(self):
+        self.outputs["run list"] = json.dumps([queued(5, 40)])
+        runs = self.gh.queued_runs(REPO)
+        self.assertEqual(runs[0]["databaseId"], 5)
+        command = self.commands[0]
+        self.assertEqual(command[:4], ["gh", "run", "list", "--repo"])
+        self.assertIn("queued", command)
+        self.assertIn("databaseId,createdAt,headBranch,workflowName", command)
 
     def test_open_prs_filters_by_label_and_parses_json(self):
         self.outputs["pr list"] = json.dumps([pr(2)])
