@@ -25,6 +25,15 @@ jobs:
       min-memory-mb: 512
       min-disk-mb: 512
 
+  # Fixture caller of the change detection, on the real pull request or push event.
+  changes:
+    name: Fixture caller (changes)
+    uses: ./.github/workflows/changes.yml
+    permissions:
+      contents: read
+    with:
+      filters: '{"workflows":[".github/**"],"tests":["tests/**"],"docs":["*.md","LICENSE"]}'
+
   tests:
     name: Tests and workflow lint
     runs-on: ubuntu-latest
@@ -46,6 +55,9 @@ jobs:
 
       - name: Gate script tests
         run: bash tests/gate.test.sh
+
+      - name: Changes script tests
+        run: bash tests/changes.test.sh
 
   supply-chain:
     name: Supply chain (zizmor + gitleaks)
@@ -80,7 +92,7 @@ jobs:
   gate:
     name: Gate
     if: ${{ always() }}
-    needs: [preflight, tests, supply-chain]
+    needs: [preflight, changes, tests, supply-chain]
     uses: ./.github/workflows/gate.yml
     with:
       needs-json: ${{ toJSON(needs) }}

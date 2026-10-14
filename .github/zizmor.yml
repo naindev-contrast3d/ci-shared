@@ -3,5 +3,7 @@ rules:
     ignore:
       # The documented `./` form of a local reusable workflow; the `$/` form is not used here
       # because its support in actionlint and on GitHub was not verified.
+      # Keyed by line number: update these when lines are added above them in ci.yml.
       - ci.yml:22
-      - ci.yml:84
+      - ci.yml:31
+      - ci.yml:96

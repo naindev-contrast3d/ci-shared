@@ -1,0 +1,157 @@
+name: Changes
+
+# Reusable workflow: tells the caller which areas of the repository a change touches, so that heavy
+# jobs can be skipped inside the workflow. Never use workflow-level `paths:` filters on a workflow
+# that provides a required check: a skipped workflow leaves its check pending forever.
+#
+# Safe by default: whenever the diff cannot be known with certainty (no base commit, base not
+# fetchable, empty diff, a change under a global pattern) every area is reported as changed.
+# Patterns use shell globbing where `*` also matches `/`, so `backend/**` and `backend/*` are equal.
+#
+#   jobs:
+#     changes:
+#       uses: naindev-contrast3d/ci-shared/.github/workflows/changes.yml@<full commit sha>
+#       with:
+#         filters: '{"backend":["backend/**"],"frontend":["frontend/**"],"docs":["docs/**","*.md"]}'
+#     frontend:
+#       needs: changes
+#       if: ${{ fromJSON(needs.changes.outputs.areas).frontend }}
+#     gate:
+#       if: ${{ always() }}
+#       needs: [changes, frontend]
+#       uses: naindev-contrast3d/ci-shared/.github/workflows/gate.yml@<full commit sha>
+#       with:
+#         needs-json: ${{ toJSON(needs) }}
+#         allowed-skipped: '["frontend"]'
+
+on:
+  workflow_call:
+    inputs:
+      filters:
+        description: 'JSON object: area name -> non-empty array of glob patterns.'
+        type: string
+        required: true
+      global-patterns:
+        description: JSON array of glob patterns that turn every area on when a changed file matches.
+        type: string
+        default: '[".github/**"]'
+      runs-on:
+        description: JSON for the `runs-on` of the job, a label or an array of labels.
+        type: string
+        default: '"ubuntu-latest"'
+    outputs:
+      areas:
+        description: 'JSON object: area name -> true when the change touches it.'
+        value: ${{ jobs.changes.outputs.areas }}
+      reason:
+        description: Why the areas have these values.
+        value: ${{ jobs.changes.outputs.reason }}
+
+permissions: {}
+
+jobs:
+  changes:
+    name: Changed areas
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      areas: ${{ steps.compute.outputs.areas }}
+      reason: ${{ steps.compute.outputs.reason }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - id: compute
+        name: Compute the changed areas
+        env:
+          FILTERS_JSON: ${{ inputs.filters }}
+          GLOBAL_PATTERNS: ${{ inputs.global-patterns }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! jq -e 'type == "object" and length > 0
+                      and all(.[]; type == "array" and length > 0 and all(.[]; type == "string"))' \
+                <<<"$FILTERS_JSON" >/dev/null 2>&1; then
+            echo "::error title=changes::filters is not a JSON object of non-empty string arrays"
+            exit 1
+          fi
+          if ! jq -e 'type == "array" and all(.[]; type == "string")' <<<"$GLOBAL_PATTERNS" >/dev/null 2>&1; then
+            echo "::error title=changes::global-patterns is not a JSON array of strings"
+            exit 1
+          fi
+
+          all_true="$(jq -c 'with_entries(.value = true)' <<<"$FILTERS_JSON")"
+
+          emit() {
+            local areas="$1" reason="$2"
+            {
+              echo "areas=$areas"
+              echo "reason=$reason"
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo "### Changed areas"
+              echo
+              echo "$reason"
+              echo
+              echo "| Area | Changed |"
+              echo "| --- | --- |"
+              jq -r 'to_entries[] | "| \(.key) | \(if .value then "yes" else "no" end) |"' <<<"$areas"
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          }
+
+          fallback() {
+            emit "$all_true" "$1"
+            exit 0
+          }
+
+          if [ -z "${BASE_SHA:-}" ] || [[ "$BASE_SHA" =~ ^0+$ ]]; then
+            fallback "no base commit for this event: every area is assumed changed"
+          fi
+
+          if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            auth="$(printf 'x-access-token:%s' "${GH_TOKEN:-}" | base64 | tr -d '\n')"
+            echo "::add-mask::$auth"
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
+              git fetch --no-tags --depth=1 -q origin "$BASE_SHA" 2>/dev/null || true
+          fi
+          if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            fallback "base commit not available: every area is assumed changed"
+          fi
+
+          if ! mapfile -d '' files < <(git diff --name-only --no-renames -z "$BASE_SHA" HEAD); then
+            fallback "diff failed: every area is assumed changed"
+          fi
+          if [ "${#files[@]}" -eq 0 ]; then
+            fallback "empty diff: every area is assumed changed"
+          fi
+
+          while IFS= read -r pattern; do
+            pattern="${pattern%$'\r'}"
+            for f in "${files[@]}"; do
+              # shellcheck disable=SC2053 # the pattern is meant to be a glob
+              if [[ "$f" == $pattern ]]; then
+                fallback "global pattern '$pattern' matched '$f': every area is assumed changed"
+              fi
+            done
+          done < <(jq -r '.[]' <<<"$GLOBAL_PATTERNS")
+
+          results=""
+          while IFS= read -r area; do
+            area="${area%$'\r'}"
+            hit=false
+            while IFS= read -r pattern; do
+              pattern="${pattern%$'\r'}"
+              for f in "${files[@]}"; do
+                # shellcheck disable=SC2053 # the pattern is meant to be a glob
+                if [[ "$f" == $pattern ]]; then hit=true; break 2; fi
+              done
+            done < <(jq -r --arg a "$area" '.[$a][]' <<<"$FILTERS_JSON")
+            results+="$area"$'\t'"$hit"$'\n'
+          done < <(jq -r 'keys_unsorted[]' <<<"$FILTERS_JSON")
+
+          areas="$(jq -Rnc '[inputs | select(length > 0) | split("\t") | {(.[0]): (.[1] == "true")}] | add' <<<"$results")"
+          emit "$areas" "diff of ${#files[@]} file(s) against ${BASE_SHA:0:7}"
