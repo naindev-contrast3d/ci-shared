@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # Keeps the pinned commits of the actions used by this repository's own CI current.
+  # The cooldown avoids adopting a release on its first day.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
