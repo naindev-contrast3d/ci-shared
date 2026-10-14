@@ -50,7 +50,10 @@ class FakeGithub:
         merge_error=False,
         queue=None,
         queue_error=False,
+        comment_error=False,
     ):
+        self.comment_error = comment_error
+        self.comments = []
         self.prs = prs or []
         self.queue = queue or {}
         self.queue_error = queue_error
@@ -90,6 +93,11 @@ class FakeGithub:
         if self.merge_error:
             raise subprocess.CalledProcessError(1, ["gh"], stderr="not allowed")
 
+    def comment(self, repo, number, body):
+        if self.comment_error:
+            raise subprocess.CalledProcessError(1, ["gh"], stderr="comment boom")
+        self.comments.append((repo, number, body))
+
     def update_branch(self, repo, number, sha):
         self.calls.append(("update", repo, number, sha))
         return self.update_result
@@ -101,17 +109,93 @@ class FakeGithub:
         return [c for c in self.calls if c[0] != "open_prs"]
 
 
-def run(gh, repos=None, dry_run=False, alerts=None, now=None):
+def run(gh, repos=None, dry_run=False, alerts=None, now=None, heartbeat=None):
     logs = []
     settings = train.Settings()
     configs = repos or [train.RepoConfig(repo=REPO)]
     code = train.run_cycle(
-        gh, configs, settings, dry_run=dry_run, log=logs.append, alerts=alerts, now=now
+        gh,
+        configs,
+        settings,
+        dry_run=dry_run,
+        log=logs.append,
+        alerts=alerts,
+        now=now,
+        heartbeat=heartbeat,
     )
     return code, logs
 
 
 NOW = dt.datetime(2026, 10, 14, 13, 0, 0, tzinfo=dt.UTC)
+
+
+class MergeMark(unittest.TestCase):
+    """The train marks what it merges, so a merge made around it can be counted (FR13)."""
+
+    def test_a_merged_pull_request_gets_the_train_mark_with_its_head(self):
+        gh = FakeGithub(prs=[pr(7)])
+        run(gh)
+        self.assertEqual(len(gh.comments), 1)
+        repo, number, body = gh.comments[0]
+        self.assertEqual((repo, number), (REPO, 7))
+        self.assertIn(train.MERGE_MARK, body)
+        self.assertIn(SHA[:12], body)
+
+    def test_nothing_is_marked_in_a_dry_run_or_when_the_merge_is_refused(self):
+        dry = FakeGithub(prs=[pr(7)])
+        run(dry, dry_run=True)
+        refused = FakeGithub(prs=[pr(7)], merge_error=True)
+        run(refused)
+        self.assertEqual((dry.comments, refused.comments), ([], []))
+
+    def test_a_failing_comment_is_logged_and_does_not_undo_or_fail_the_merge(self):
+        gh = FakeGithub(prs=[pr(7)], comment_error=True)
+        code, logs = run(gh)
+        self.assertEqual(code, 0)
+        self.assertEqual(gh.mutations(), [("merge", REPO, 7, SHA, "merge")])
+        self.assertTrue(any("mark failed" in line for line in logs))
+
+
+class HeartbeatLine(unittest.TestCase):
+    """A line at least once an hour proves the train is alive and says which script it runs (FR14)."""
+
+    def state(self):
+        return Path(tempfile.mkdtemp()) / "heartbeat.json"
+
+    def test_the_first_cycle_logs_a_heartbeat_with_counts_and_the_script_version(self):
+        gh = FakeGithub(prs=[pr(1), pr(2, "b" * 40)], behind=2)
+        _, logs = run(gh, heartbeat=train.Heartbeat(self.state()), now=NOW)
+        line = next(item for item in logs if "heartbeat" in item)
+        self.assertIn("1 repositories", line)
+        self.assertIn("2 labelled pull requests", line)
+        self.assertIn(train.script_version(), line)
+
+    def test_no_second_heartbeat_within_the_hour_but_one_after_it(self):
+        path = self.state()
+        gh = FakeGithub(prs=[])
+        _, first = run(gh, heartbeat=train.Heartbeat(path), now=NOW)
+        _, soon = run(
+            gh, heartbeat=train.Heartbeat(path), now=NOW + dt.timedelta(minutes=59)
+        )
+        _, later = run(
+            gh, heartbeat=train.Heartbeat(path), now=NOW + dt.timedelta(minutes=61)
+        )
+        counts = [
+            sum("heartbeat" in item for item in logs) for logs in (first, soon, later)
+        ]
+        self.assertEqual(counts, [1, 0, 1])
+
+    def test_a_dry_run_does_not_write_the_heartbeat_state(self):
+        path = self.state()
+        run(FakeGithub(prs=[]), dry_run=True, heartbeat=train.Heartbeat(path), now=NOW)
+        self.assertFalse(path.exists())
+
+    def test_the_script_version_is_the_same_for_lf_and_crlf_copies(self):
+        text = "a\nb\n"
+        self.assertEqual(
+            train.text_version(text), train.text_version(text.replace("\n", "\r\n"))
+        )
+        self.assertNotEqual(train.text_version(text), train.text_version(text + "c\n"))
 
 
 def queued(run_id, minutes_ago, branch="feat/x", workflow="CI"):
@@ -439,6 +523,13 @@ class RealGithubCommands(unittest.TestCase):
                 SHA,
             ],
         )
+
+    def test_comment_posts_the_body_on_the_pull_request(self):
+        self.gh.comment(REPO, 9, f"{train.MERGE_MARK}\nMerged")
+        self.assertEqual(
+            self.commands[0][:7], ["gh", "pr", "comment", "9", "--repo", REPO, "--body"]
+        )
+        self.assertIn(train.MERGE_MARK, self.commands[0][7])
 
     def test_queued_runs_asks_for_queued_status_and_parses_json(self):
         self.outputs["run list"] = json.dumps([queued(5, 40)])

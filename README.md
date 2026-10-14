@@ -32,6 +32,9 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   logs once any workflow run that has been queued longer than `queue_alert_minutes` (default 30):
   a runner that is offline or saturated otherwise holds jobs for up to 24 hours before they fail.
   The runs already reported are remembered in `queue-alerts.json` beside the configuration.
+  After every merge it comments `<!-- merge-train:merged -->` on the pull request, so a merge made
+  around the train can be counted, and it writes a `heartbeat:` line (repositories, labelled pull
+  requests, version of the script) at most once an hour as proof of life.
   `--dry-run` changes nothing.
   Tests: `python3 -m unittest discover -s tests`.
 
@@ -45,7 +48,11 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   never reached its steps, or the shared preflight) and not the code, the median duration and the
   median queue time, followed by a snapshot of today: runners online, offline and busy, queued runs
   and open pull requests. Use it to plan from the current state, not from memory:
-  `py -3 report/ci_report.py --config train/repos.json --repo Nain9Dev/crm-platform --days 7`.
+  `py -3 report/ci_report.py --config train/repos.json --repo naindev-contrast3d/contrast-hub --days 7`.
+  For the repositories of `--config` (the shared train) the snapshot also counts the pull requests
+  merged outside the train since `--train-since`, and `--train-dir D:\Development\Tools\ci-train`
+  adds a section on the installed train: age of its log (silent after 90 minutes) and whether its
+  script differs from the one in `ci-shared` main.
   `--until 2026-10-14T11:00` ends the period in the past, so a baseline can be reproduced after later
   changes; `--limit` raises the number of runs read per repository (default 300).
 

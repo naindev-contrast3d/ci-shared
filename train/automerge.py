@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
 import subprocess
@@ -221,6 +222,9 @@ class Github:
             ]
         )
 
+    def comment(self, repo: str, number: int, body: str) -> None:
+        self._run(["gh", "pr", "comment", str(number), "--repo", repo, "--body", body])
+
     def update_branch(self, repo: str, number: int, sha: str) -> str:
         try:
             self._run(
@@ -301,6 +305,50 @@ def classify(pr: dict, cfg: RepoConfig, settings: Settings, gh) -> tuple[str, st
     return "ready", "ready"
 
 
+# Written as a comment on every pull request the train merges; the health report counts the merged
+# pull requests that lack it as merged outside the train.
+MERGE_MARK = "<!-- merge-train:merged -->"
+
+
+def text_version(text: str) -> str:
+    """A short fingerprint of a script, the same for LF and CRLF copies."""
+    normalised = text.replace("\r\n", "\n")
+    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:12]
+
+
+def script_version() -> str:
+    return text_version(Path(__file__).read_text(encoding="utf-8"))
+
+
+class Heartbeat:
+    """Decides when the train writes its hourly proof of life, and remembers the last one."""
+
+    EVERY = dt.timedelta(minutes=60)
+
+    def __init__(self, path: Path | str | None):
+        self.path = Path(path) if path else None
+        self._last: dt.datetime | None = None
+        if self.path is not None and self.path.exists():
+            try:
+                self._last = dt.datetime.fromisoformat(
+                    json.loads(self.path.read_text(encoding="utf-8"))["last"]
+                )
+            except (OSError, ValueError, KeyError, TypeError):
+                self._last = (
+                    None  # an unreadable state only means one heartbeat too many
+                )
+
+    def due(self, now: dt.datetime) -> bool:
+        return self._last is None or now - self._last >= self.EVERY
+
+    def mark(self, now: dt.datetime) -> None:
+        self._last = now
+        if self.path is not None:
+            self.path.write_text(
+                json.dumps({"last": now.isoformat()}), encoding="utf-8"
+            )
+
+
 class QueueAlerts:
     """Remembers which queued runs were already reported, so each one is logged once."""
 
@@ -355,10 +403,12 @@ def run_cycle(
     log: Callable[[str], None],
     alerts: QueueAlerts | None = None,
     now: dt.datetime | None = None,
+    heartbeat: Heartbeat | None = None,
 ) -> int:
     """One pass over every repository. Returns 0 when nothing went wrong, 1 otherwise."""
     code = 0
     moment = now or dt.datetime.now(dt.UTC)
+    seen: list[int] = []
     for cfg in configs:
         repo_log = lambda line, r=cfg.repo: log(f"{r} {line}")
         if alerts is not None:
@@ -382,16 +432,32 @@ def run_cycle(
                 detail = (getattr(exc, "stderr", "") or str(exc)).strip()[:200]
                 repo_log(f"queue check failed: {detail}")
         try:
-            _repo_cycle(gh, cfg, settings, dry_run, repo_log)
+            _repo_cycle(gh, cfg, settings, dry_run, repo_log, seen)
         except (subprocess.CalledProcessError, OSError, ValueError, KeyError) as exc:
             detail = (getattr(exc, "stderr", "") or str(exc)).strip()[:300]
             log(f"{cfg.repo}: failed: {detail}")
             code = 1
+    if heartbeat is not None and heartbeat.due(moment):
+        log(
+            f"heartbeat: {len(configs)} repositories, {sum(seen)} labelled pull requests, "
+            f"script {script_version()}"
+        )
+        if not dry_run:
+            heartbeat.mark(moment)
     return code
 
 
-def _repo_cycle(gh, cfg: RepoConfig, settings: Settings, dry_run: bool, log) -> None:
+def _repo_cycle(
+    gh,
+    cfg: RepoConfig,
+    settings: Settings,
+    dry_run: bool,
+    log,
+    seen: list[int] | None = None,
+) -> None:
     prs = gh.open_prs(cfg.repo, settings.label)
+    if seen is not None:
+        seen.append(len(prs))  # for the heartbeat line
     if not prs:
         return
     states = {}
@@ -429,6 +495,16 @@ def _repo_cycle(gh, cfg: RepoConfig, settings: Settings, dry_run: bool, log) -> 
             log(f"#{number}: merge refused: {(exc.stderr or '').strip()[:300]}")
             raise
         log(f"#{number}: merged {pr['headRefOid'][:12]}")
+        # The mark tells apart a merge made by the train from one made around it (FR13). The merge
+        # is already done: a failing comment is logged, never an error of the cycle.
+        try:
+            gh.comment(
+                cfg.repo,
+                number,
+                f"{MERGE_MARK}\nMerged by the merge train at head `{pr['headRefOid'][:12]}`.",
+            )
+        except subprocess.CalledProcessError as exc:
+            log(f"#{number}: mark failed: {(exc.stderr or '').strip()[:200]}")
     elif stale:
         number, pr = stale[0]
         if dry_run:
@@ -473,8 +549,15 @@ def main(argv: list[str] | None = None) -> int:
         log(f"configuration error: {exc}")
         return 2
     alerts = QueueAlerts(Path(args.config).with_name("queue-alerts.json"))
+    heartbeat = Heartbeat(Path(args.config).with_name("heartbeat.json"))
     return run_cycle(
-        Github(), configs, settings, dry_run=args.dry_run, log=log, alerts=alerts
+        Github(),
+        configs,
+        settings,
+        dry_run=args.dry_run,
+        log=log,
+        alerts=alerts,
+        heartbeat=heartbeat,
     )
 
 

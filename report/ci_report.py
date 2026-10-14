@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 import statistics
@@ -28,6 +29,14 @@ from pathlib import Path
 
 RUN_FIELDS = "databaseId,conclusion,status,workflowName,createdAt,startedAt,updatedAt,event,headBranch"
 INFRA_STEPS = ("Set up job", "Complete job")
+# The comment the merge train writes on every pull request it merges (train/automerge.py).
+TRAIN_MARK = "<!-- merge-train:merged -->"
+TRAIN_SILENT_AFTER_MIN = 90  # the train writes a heartbeat every 60 minutes
+
+
+def text_version(text: str) -> str:
+    """A short fingerprint of a script, the same for LF and CRLF copies (as in the train)."""
+    return hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()[:12]
 
 
 def run_gh(command: list[str]) -> str:
@@ -91,6 +100,38 @@ class Github:
         )
         return json.loads(out or "[]")
 
+    def merged_prs(self, repo: str, limit: int) -> list[dict]:
+        out = self._run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "merged",
+                "--limit",
+                str(limit),
+                "--json",
+                "number,mergedAt,comments",
+            ]
+        )
+        return json.loads(out or "[]")
+
+    def file_text(self, repo: str, path: str) -> str | None:
+        try:
+            return self._run(
+                [
+                    "gh",
+                    "api",
+                    "-H",
+                    "Accept: application/vnd.github.raw+json",
+                    f"repos/{repo}/contents/{path}",
+                ]
+            )
+        except subprocess.CalledProcessError:
+            return None
+
     def open_prs(self, repo: str) -> list[dict]:
         out = self._run(
             [
@@ -126,6 +167,9 @@ class RepoStats:
     oldest_queued_min: int | None = None
     open_prs: int = 0
     automerge_prs: int = 0
+    # Only for repositories served by the shared merge train; None elsewhere.
+    merged_total: int | None = None
+    merged_by_hand: int | None = None
 
     @property
     def fail_rate(self) -> float | None:
@@ -172,6 +216,8 @@ def collect(
     sample: int = 30,
     until: dt.datetime | None = None,
     limit: int = 300,
+    train_repos: frozenset[str] | set[str] = frozenset(),
+    train_since: dt.datetime | None = None,
 ) -> RepoStats:
     """Metrics for runs created in the `days` before `until` (default `now`).
 
@@ -237,7 +283,87 @@ def collect(
         for p in prs
         if "automerge" in {label["name"] for label in p.get("labels", [])}
     )
+
+    if repo in train_repos:
+        floor = max(since, train_since) if train_since else since
+        merged = [
+            m for m in gh.merged_prs(repo, 200) if floor <= _parse(m["mergedAt"]) <= end
+        ]
+        stats.merged_total = len(merged)
+        stats.merged_by_hand = sum(
+            1
+            for m in merged
+            if not any(
+                TRAIN_MARK in (c.get("body") or "") for c in m.get("comments", [])
+            )
+        )
     return stats
+
+
+@dataclass
+class TrainHealth:
+    log_age_min: (
+        int | None
+    )  # minutes since the log was last written; None without a log
+    silent: bool  # no log line for too long
+    copy: str  # current, stale, missing or unknown
+    installed_version: str | None = None
+    repository_version: str | None = None
+
+
+def train_health(
+    train_dir: Path,
+    gh,
+    now: dt.datetime,
+    repo: str = "naindev-contrast3d/ci-shared",
+) -> TrainHealth:
+    """Is the installed train alive and is it the script of `ci-shared` main?"""
+    train_dir = Path(train_dir)
+    script = train_dir / "automerge.py"
+    log = train_dir / "train.log"
+
+    age = None
+    if log.exists():
+        modified = dt.datetime.fromtimestamp(log.stat().st_mtime, dt.UTC)
+        age = int((now - modified).total_seconds() // 60)
+    silent = age is not None and age > TRAIN_SILENT_AFTER_MIN
+
+    if not script.exists():
+        return TrainHealth(age, silent, "missing")
+    installed = text_version(script.read_text(encoding="utf-8"))
+    published = gh.file_text(repo, "train/automerge.py")
+    if published is None:
+        return TrainHealth(age, silent, "unknown", installed_version=installed)
+    current = text_version(published)
+    return TrainHealth(
+        age, silent, "current" if installed == current else "stale", installed, current
+    )
+
+
+def render_train(health: TrainHealth) -> str:
+    lines = ["## Merge train", ""]
+    if health.copy == "missing":
+        lines.append("- Installed copy not found (the train is not installed here).")
+        return "\n".join(lines)
+    if health.log_age_min is None:
+        lines.append("- No log yet.")
+    elif health.silent:
+        lines.append(
+            f"- Warning: no log line for {health.log_age_min} min "
+            f"(the train writes a heartbeat every 60 minutes)."
+        )
+    else:
+        lines.append(f"- Last log activity {health.log_age_min} min ago.")
+    if health.copy == "current":
+        lines.append("- The installed script matches ci-shared main.")
+    elif health.copy == "stale":
+        lines.append(
+            f"- Warning: the installed script differs from ci-shared main "
+            f"(installed {health.installed_version}, repository {health.repository_version})."
+        )
+    else:
+        lines.append("- Could not read the script of ci-shared main to compare.")
+    return "\n".join(lines)
 
 
 def fmt_duration(seconds: float | None) -> str:
@@ -302,6 +428,10 @@ def render(
         lines.append(
             f"- Open pull requests: {s.open_prs} ({s.automerge_prs} labelled automerge)"
         )
+        if s.merged_by_hand is not None:
+            lines.append(
+                f"- Merged outside the train: {s.merged_by_hand} of {s.merged_total}"
+            )
         lines.append("")
     return "\n".join(lines)
 
@@ -348,13 +478,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="append the standards audit of the organisation",
     )
+    parser.add_argument(
+        "--train-dir",
+        help="folder of the installed merge train (automerge.py and train.log): adds its health",
+    )
+    parser.add_argument(
+        "--train-since",
+        help="UTC date the shared train started serving the repositories of --config; "
+        "earlier merges are not counted as made around it",
+    )
     parser.add_argument("--output", help="write the report here instead of printing it")
     args = parser.parse_args(argv)
 
     repos = list(args.repo)
+    train_repos: set[str] = set()
     if args.config:
         data = json.loads(Path(args.config).read_text(encoding="utf-8"))
-        repos += [entry["repo"] for entry in data.get("repos", [])]
+        train_repos = {entry["repo"] for entry in data.get("repos", [])}
+        repos += sorted(train_repos)
     if not repos:
         print("give at least one --repo or a --config", file=sys.stderr)
         return 2
@@ -362,11 +503,24 @@ def main(argv: list[str] | None = None) -> int:
     now = dt.datetime.now(dt.UTC)
     gh = Github()
     until = parse_moment(args.until) if args.until else None
+    train_since = parse_moment(args.train_since) if args.train_since else None
     stats = [
-        collect(gh, repo, args.workflow, args.days, now, until=until, limit=args.limit)
+        collect(
+            gh,
+            repo,
+            args.workflow,
+            args.days,
+            now,
+            until=until,
+            limit=args.limit,
+            train_repos=train_repos,
+            train_since=train_since,
+        )
         for repo in repos
     ]
     text = render(stats, args.days, now, until=until)
+    if args.train_dir:
+        text += "\n\n" + render_train(train_health(Path(args.train_dir), gh, now))
     if args.audit:
         audit = load_audit()
         standard_path = Path(audit.__file__).with_name("standards.json")
