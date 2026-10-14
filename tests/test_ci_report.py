@@ -178,6 +178,25 @@ class Metrics(unittest.TestCase):
         self.assertIsNone(stats.median_queue_s)
 
 
+class AuditSection(unittest.TestCase):
+    """`--audit` appends the standards audit to the report."""
+
+    def test_the_audit_module_is_found_beside_the_report(self):
+        module = report.load_audit()
+        self.assertTrue(callable(module.run))
+        self.assertTrue(callable(module.render))
+
+    def test_the_section_is_the_audit_report_without_its_own_title(self):
+        module = report.load_audit()
+        findings = [module.Finding("o/a", "license", "error", "license not recognised")]
+        text = report.audit_section(module.render(findings, NOW))
+        self.assertTrue(text.startswith("## Standards audit"))
+        self.assertIn("- error `license`: license not recognised", text)
+        self.assertNotIn(
+            "# Standards audit\n\n2026", text.replace("## Standards audit", "")
+        )
+
+
 class Until(unittest.TestCase):
     """A window that ends in the past makes a baseline reproducible after later changes."""
 

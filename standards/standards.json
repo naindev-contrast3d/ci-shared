@@ -1,0 +1,43 @@
+{
+  "organisation": "naindev-contrast3d",
+  "max_topic_branches": 8,
+  "severity": {},
+  "exceptions": [
+    {
+      "repo": "naindev-contrast3d/contrast-hub",
+      "rule": "shared-gate",
+      "reason": "its own `sello` job is the aggregate check and publishes the ci-ok seal (spec 365, ADR-0092)",
+      "expires": "2027-04-01"
+    },
+    {
+      "repo": "naindev-contrast3d/ci-shared",
+      "rule": "shared-gate",
+      "reason": "it is the source of the gate and calls it by a local path in its own CI",
+      "expires": "2027-04-01"
+    },
+    {
+      "repo": "naindev-contrast3d/.github",
+      "rule": "has-ci",
+      "reason": "the organisation profile repository holds only a README and community files",
+      "expires": "2027-04-01"
+    },
+    {
+      "repo": "naindev-contrast3d/.github",
+      "rule": "dependabot-config",
+      "reason": "no workflows and no dependencies to update",
+      "expires": "2027-04-01"
+    },
+    {
+      "repo": "naindev-contrast3d/.github",
+      "rule": "license",
+      "reason": "the organisation profile repository is documentation, not reusable code",
+      "expires": "2027-04-01"
+    },
+    {
+      "repo": "naindev-contrast3d/dse",
+      "rule": "shared-gate",
+      "reason": "the session 'dse github move' is building its own CI; adoption is T23 of next-ci-reliability",
+      "expires": "2026-11-15"
+    }
+  ]
+}

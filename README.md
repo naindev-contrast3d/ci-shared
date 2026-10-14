@@ -49,6 +49,15 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   `--until 2026-10-14T11:00` ends the period in the past, so a baseline can be reproduced after later
   changes; `--limit` raises the number of runs read per repository (default 300).
 
+- `standards/audit.py` (available): audits every repository of the organisation against
+  `standards/standards.json` and prints each deviation as `error`, `warning` or `info`: branch
+  deletion after merge, Dependabot, CODEOWNERS, secret scanning and a recognised license on public
+  repositories, a CI that calls the shared gate pinned by a full SHA with a `# vX.Y.Z` comment, too
+  many leftover branches, and the organisation's two-factor requirement. An exception names a
+  repository and a rule, gives a reason and expires; an expired one is itself an error.
+  `py -3 standards/audit.py [--fail-on error]`, or `report/ci_report.py --audit` to append it to the
+  weekly report.
+
 ## Rules
 
 - No secrets, no business logic and no repository-specific values: everything comes in as an input.
