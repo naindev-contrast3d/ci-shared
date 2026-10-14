@@ -1,0 +1,74 @@
+name: CI
+
+# Checks of this repository itself: workflow lint, supply chain and the tests of the shared scripts.
+# GitHub-hosted runners: nothing here needs the LAN.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Fixture caller: the healthy path of the reusable preflight, called the way a consumer calls it.
+  preflight:
+    name: Fixture caller (preflight)
+    uses: ./.github/workflows/preflight.yml
+    with:
+      required-tools: "git"
+      min-memory-mb: 512
+      min-disk-mb: 512
+
+  tests:
+    name: Tests and workflow lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: actionlint
+        run: >-
+          docker run --rm --user "$(id -u):$(id -g)"
+          -v "$GITHUB_WORKSPACE:/repo:ro" -w /repo
+          rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+          -color
+
+      - name: Preflight script tests
+        run: bash tests/preflight.test.sh
+
+  supply-chain:
+    name: Supply chain (zizmor + gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: zizmor on the workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp
+          -e GH_TOKEN
+          -v "$GITHUB_WORKSPACE:/repo:ro" -w /repo
+          ghcr.io/zizmorcore/zizmor@sha256:a2eb396d886c053073405c7a980f2139ba2248ec172243cfa3841e57196e8101
+          --format github .github/
+
+      - name: gitleaks over the history of this commit
+        if: ${{ !cancelled() }}
+        run: >-
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp
+          -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo
+          -v "$GITHUB_WORKSPACE:/repo:ro" -w /repo
+          ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git --redact --no-banner --exit-code 1 --log-opts="--full-history HEAD" .

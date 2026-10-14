@@ -1,0 +1,94 @@
+name: Preflight
+
+# Reusable workflow: checks that a runner can do the job before any build job starts.
+# A failure here is labelled `infra`, so it is never mistaken for a defect in the code under test.
+#
+#   jobs:
+#     preflight:
+#       uses: naindev-contrast3d/ci-shared/.github/workflows/preflight.yml@<full commit sha>
+#       with:
+#         runs-on: '["self-hosted","linux","x64"]'
+#         required-tools: "git gh docker"
+#     backend:
+#       needs: preflight
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: JSON for the `runs-on` of the preflight job, a label or an array of labels.
+        type: string
+        default: '"ubuntu-latest"'
+      required-tools:
+        description: Space-separated executables that must be on PATH. `docker` also needs a reachable daemon.
+        type: string
+        default: "git gh"
+      min-memory-mb:
+        description: Minimum available memory, in MB.
+        type: number
+        default: 2048
+      min-disk-mb:
+        description: Minimum free disk space on the workspace volume, in MB.
+        type: number
+        default: 5120
+
+permissions: {}
+
+jobs:
+  preflight:
+    name: Runner preflight
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 5
+    steps:
+      - id: check
+        name: Check tools, memory and disk
+        env:
+          REQUIRED_TOOLS: ${{ inputs.required-tools }}
+          MIN_MEMORY_MB: ${{ inputs.min-memory-mb }}
+          MIN_DISK_MB: ${{ inputs.min-disk-mb }}
+          DISK_PATH: ${{ github.workspace }}
+        run: |
+          problems=()
+
+          for tool in $REQUIRED_TOOLS; do
+            if [[ ! "$tool" =~ ^[A-Za-z0-9_.+-]+$ ]]; then
+              problems+=("invalid tool name: $tool")
+              continue
+            fi
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              problems+=("missing tool: $tool")
+            elif [ "$tool" = "docker" ] && ! docker info >/dev/null 2>&1; then
+              problems+=("docker daemon is not reachable")
+            fi
+          done
+
+          if mem_kb="$(awk '/^MemAvailable:/ {print $2}' "${MEMINFO:-/proc/meminfo}" 2>/dev/null)" && [ -n "$mem_kb" ]; then
+            mem_mb=$((mem_kb / 1024))
+            if [ "$mem_mb" -lt "$MIN_MEMORY_MB" ]; then
+              problems+=("available memory $mem_mb MB is below $MIN_MEMORY_MB MB")
+            fi
+          else
+            problems+=("cannot read available memory")
+          fi
+
+          disk_mb="$(df -Pm "${DISK_PATH:-.}" 2>/dev/null | awk 'NR==2 {print $4}')"
+          if [ -z "$disk_mb" ]; then
+            problems+=("cannot read free disk space")
+          elif [ "$disk_mb" -lt "$MIN_DISK_MB" ]; then
+            problems+=("free disk $disk_mb MB is below $MIN_DISK_MB MB")
+          fi
+
+          if [ "${#problems[@]}" -gt 0 ]; then
+            for p in "${problems[@]}"; do
+              echo "::error title=infra::$p"
+            done
+            {
+              echo "### Preflight failed (failure class: infra)"
+              echo
+              for p in "${problems[@]}"; do echo "- $p"; done
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 1
+          fi
+
+          echo "Preflight passed: tools present, ${mem_mb} MB memory available, ${disk_mb} MB disk free." \
+            >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
