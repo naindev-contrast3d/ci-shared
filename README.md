@@ -28,8 +28,11 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   `automerge` whose gate check is green (plus the `ci-ok/<sha>` seal when `require_seal` is set) and
   whose head contains the base branch. A stale head gets the base merged in through the API, without
   force-push; a conflict gets `needs-human` and loses `automerge`. `merge_method` (`merge`,
-  `squash` or `rebase`, default `merge`) follows what each repository allows. `--dry-run` changes
-  nothing.
+  `squash` or `rebase`, default `merge`) follows what each repository allows. Each cycle it also
+  logs once any workflow run that has been queued longer than `queue_alert_minutes` (default 30):
+  a runner that is offline or saturated otherwise holds jobs for up to 24 hours before they fail.
+  The runs already reported are remembered in `queue-alerts.json` beside the configuration.
+  `--dry-run` changes nothing.
   Tests: `python3 -m unittest discover -s tests`.
 
 - `train/install.ps1` (available): installs the train as the scheduled task `CI train`, every two
@@ -39,7 +42,7 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
 
 ## Planned contents
 
-- Queue alert in the train and the weekly CI health report (tasks T15 and T16 of the spec).
+- The weekly CI health report (task T16 of the spec).
 
 ## Rules
 

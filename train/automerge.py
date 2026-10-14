@@ -47,6 +47,9 @@ class ConfigError(ValueError):
 class Settings:
     label: str = "automerge"
     needs_human_label: str = "needs-human"
+    # A workflow run queued this long is logged once: a runner that is offline or saturated holds
+    # jobs for up to 24 hours before they fail.
+    queue_alert_minutes: int = 30
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,9 @@ def load_config(path: Path | str) -> tuple[Settings, list[RepoConfig]]:
     settings = Settings(
         label=_text(data, "label", defaults.label),
         needs_human_label=_text(data, "needs_human_label", defaults.needs_human_label),
+        queue_alert_minutes=_positive_int(
+            data, "queue_alert_minutes", defaults.queue_alert_minutes
+        ),
     )
     entries = data.get("repos")
     if not isinstance(entries, list) or not entries:
@@ -106,6 +112,13 @@ def load_config(path: Path | str) -> tuple[Settings, list[RepoConfig]]:
     return settings, repos
 
 
+def _positive_int(source: dict, key: str, default: int) -> int:
+    value = source.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigError(f"`{key}` must be a positive integer")
+    return value
+
+
 def _text(source: dict, key: str, default: str) -> str:
     value = source.get(key, default)
     if not isinstance(value, str) or not value:
@@ -127,6 +140,24 @@ class Github:
 
     def __init__(self, run: Callable[[list[str]], str] = run_gh):
         self._run = run
+
+    def queued_runs(self, repo: str) -> list[dict]:
+        out = self._run(
+            [
+                "gh",
+                "run",
+                "list",
+                "--repo",
+                repo,
+                "--status",
+                "queued",
+                "--json",
+                "databaseId,createdAt,headBranch,workflowName",
+                "--limit",
+                "50",
+            ]
+        )
+        return json.loads(out or "[]")
 
     def open_prs(self, repo: str, label: str) -> list[dict]:
         out = self._run(
@@ -270,6 +301,51 @@ def classify(pr: dict, cfg: RepoConfig, settings: Settings, gh) -> tuple[str, st
     return "ready", "ready"
 
 
+class QueueAlerts:
+    """Remembers which queued runs were already reported, so each one is logged once."""
+
+    def __init__(self, path: Path | str | None):
+        self.path = Path(path) if path else None
+        self._seen: dict[str, list[int]] = {}
+        if self.path is not None and self.path.exists():
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                self._seen = {repo: [int(i) for i in ids] for repo, ids in data.items()}
+            except (OSError, ValueError, TypeError, AttributeError):
+                self._seen = {}  # an unreadable state only means some runs are reported again
+
+    def check(
+        self,
+        repo: str,
+        runs: list[dict],
+        now: dt.datetime,
+        threshold_minutes: int,
+        log: Callable[[str], None],
+        persist: bool = True,
+    ) -> None:
+        known = set(self._seen.get(repo, []))
+        keep = known & {run["databaseId"] for run in runs}
+        for run in sorted(runs, key=lambda item: item["databaseId"]):
+            run_id = run["databaseId"]
+            created = dt.datetime.fromisoformat(run["createdAt"])
+            minutes = (now - created).total_seconds() / 60
+            if minutes >= threshold_minutes and run_id not in known:
+                log(
+                    f"queued {int(minutes)} min: {run.get('workflowName', '?')} on "
+                    f"{run.get('headBranch', '?')} (run {run_id})"
+                )
+                keep.add(run_id)
+        if persist and (keep != known or repo not in self._seen):
+            self._seen[repo] = sorted(keep)
+            self._save()
+
+    def _save(self) -> None:
+        if self.path is not None:
+            self.path.write_text(
+                json.dumps(self._seen, sort_keys=True), encoding="utf-8"
+            )
+
+
 def run_cycle(
     gh,
     configs: list[RepoConfig],
@@ -277,14 +353,36 @@ def run_cycle(
     *,
     dry_run: bool,
     log: Callable[[str], None],
+    alerts: QueueAlerts | None = None,
+    now: dt.datetime | None = None,
 ) -> int:
     """One pass over every repository. Returns 0 when nothing went wrong, 1 otherwise."""
     code = 0
+    moment = now or dt.datetime.now(dt.UTC)
     for cfg in configs:
+        repo_log = lambda line, r=cfg.repo: log(f"{r} {line}")
+        if alerts is not None:
+            # A failing queue query must never stop the merging that follows.
+            try:
+                runs = gh.queued_runs(cfg.repo)
+                alerts.check(
+                    cfg.repo,
+                    runs,
+                    moment,
+                    settings.queue_alert_minutes,
+                    repo_log,
+                    persist=not dry_run,
+                )
+            except (
+                subprocess.CalledProcessError,
+                OSError,
+                ValueError,
+                KeyError,
+            ) as exc:
+                detail = (getattr(exc, "stderr", "") or str(exc)).strip()[:200]
+                repo_log(f"queue check failed: {detail}")
         try:
-            _repo_cycle(
-                gh, cfg, settings, dry_run, lambda line, r=cfg.repo: log(f"{r} {line}")
-            )
+            _repo_cycle(gh, cfg, settings, dry_run, repo_log)
         except (subprocess.CalledProcessError, OSError, ValueError, KeyError) as exc:
             detail = (getattr(exc, "stderr", "") or str(exc)).strip()[:300]
             log(f"{cfg.repo}: failed: {detail}")
@@ -374,7 +472,10 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         log(f"configuration error: {exc}")
         return 2
-    return run_cycle(Github(), configs, settings, dry_run=args.dry_run, log=log)
+    alerts = QueueAlerts(Path(args.config).with_name("queue-alerts.json"))
+    return run_cycle(
+        Github(), configs, settings, dry_run=args.dry_run, log=log, alerts=alerts
+    )
 
 
 if __name__ == "__main__":
