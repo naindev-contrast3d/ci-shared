@@ -58,6 +58,12 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   `py -3 standards/audit.py [--fail-on error]`, or `report/ci_report.py --audit` to append it to the
   weekly report.
 
+- `standards/bootstrap.py` (available): applies the organisation's repository settings to a new
+  repository: branch deletion after merge, secret scanning and push protection where they are free,
+  Dependabot alerts and security updates, and the `automerge` and `needs-human` labels the merge
+  train uses. A dry run by default; `--apply` makes the changes.
+  `py -3 standards/bootstrap.py owner/name [--apply]`.
+
 ## Rules
 
 - No secrets, no business logic and no repository-specific values: everything comes in as an input.
