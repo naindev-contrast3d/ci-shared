@@ -55,6 +55,11 @@ class RepoConfig:
     gate_check: str = "Gate / Gate"
     require_seal: bool = False
     base: str = "main"
+    # How `gh pr merge` merges; a repository may allow only some methods (contrast-viewer: squash).
+    merge_method: str = "merge"
+
+
+MERGE_METHODS = ("merge", "squash", "rebase")
 
 
 def load_config(path: Path | str) -> tuple[Settings, list[RepoConfig]]:
@@ -84,12 +89,18 @@ def load_config(path: Path | str) -> tuple[Settings, list[RepoConfig]]:
         require_seal = entry.get("require_seal", False)
         if not isinstance(require_seal, bool):
             raise ConfigError(f"{repo}: `require_seal` must be true or false")
+        merge_method = _text(entry, "merge_method", RepoConfig.merge_method)
+        if merge_method not in MERGE_METHODS:
+            raise ConfigError(
+                f"{repo}: `merge_method` must be one of {', '.join(MERGE_METHODS)}"
+            )
         repos.append(
             RepoConfig(
                 repo=repo,
                 gate_check=_text(entry, "gate_check", RepoConfig.gate_check),
                 require_seal=require_seal,
                 base=_text(entry, "base", RepoConfig.base),
+                merge_method=merge_method,
             )
         )
     return settings, repos
@@ -162,7 +173,9 @@ class Github:
         out = self._run(["gh", "api", f"repos/{repo}/compare/{base}...{sha}"])
         return int(json.loads(out)["behind_by"])
 
-    def merge(self, repo: str, number: int, sha: str) -> None:
+    def merge(self, repo: str, number: int, sha: str, method: str = "merge") -> None:
+        if method not in MERGE_METHODS:
+            raise ValueError(f"unknown merge method {method!r}")
         self._run(
             [
                 "gh",
@@ -171,7 +184,7 @@ class Github:
                 str(number),
                 "--repo",
                 repo,
-                "--merge",
+                f"--{method}",
                 "--match-head-commit",
                 sha,
             ]
@@ -313,7 +326,7 @@ def _repo_cycle(gh, cfg: RepoConfig, settings: Settings, dry_run: bool, log) -> 
             log(f"#{number}: would merge {pr['headRefOid'][:12]} (dry run)")
             return
         try:
-            gh.merge(cfg.repo, number, pr["headRefOid"])
+            gh.merge(cfg.repo, number, pr["headRefOid"], cfg.merge_method)
         except subprocess.CalledProcessError as exc:
             log(f"#{number}: merge refused: {(exc.stderr or '').strip()[:300]}")
             raise
