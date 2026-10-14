@@ -22,9 +22,17 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   (no base commit, base not fetchable, empty diff, global pattern matched) every area is reported
   as changed. Skipped jobs must be declared in the gate's `allowed-skipped`.
 
+- `train/automerge.py` (available): the merge train. It is not a workflow: a scheduled task on the
+  owner's desktop runs it with `gh`. One cycle goes over every repository of a JSON list
+  (`train/repos.example.json`), and per repository merges at most one pull request labelled
+  `automerge` whose gate check is green (plus the `ci-ok/<sha>` seal when `require_seal` is set) and
+  whose head contains the base branch. A stale head gets the base merged in through the API, without
+  force-push; a conflict gets `needs-human` and loses `automerge`. `--dry-run` changes nothing.
+  Tests: `python3 -m unittest discover -s tests`.
+
 ## Planned contents
 
-- `automerge`: a repository-parameterised merge train that requires a sealed head containing `main`.
+- Installer of the scheduled task (task T09 of the spec).
 
 ## Rules
 
