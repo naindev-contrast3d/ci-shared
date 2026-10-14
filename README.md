@@ -46,6 +46,8 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   median queue time, followed by a snapshot of today: runners online, offline and busy, queued runs
   and open pull requests. Use it to plan from the current state, not from memory:
   `py -3 report/ci_report.py --config train/repos.json --repo Nain9Dev/crm-platform --days 7`.
+  `--until 2026-10-14T11:00` ends the period in the past, so a baseline can be reproduced after later
+  changes; `--limit` raises the number of runs read per repository (default 300).
 
 ## Rules
 

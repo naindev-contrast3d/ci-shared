@@ -178,6 +178,46 @@ class Metrics(unittest.TestCase):
         self.assertIsNone(stats.median_queue_s)
 
 
+class Until(unittest.TestCase):
+    """A window that ends in the past makes a baseline reproducible after later changes."""
+
+    def test_runs_created_after_the_end_of_the_window_are_ignored(self):
+        gh = sample_github()
+        gh._runs.append(run(20, "failure", 10, 60))  # 10 minutes ago
+        gh._jobs[20] = [("Verify", "failure", 5, "Pruebas")]
+        until = NOW - dt.timedelta(minutes=30)
+        stats = report.collect(gh, REPO, "CI", days=7, now=NOW, until=until)
+        self.assertEqual(stats.conclusive, 4)
+        self.assertEqual(stats.failed, 2)
+
+    def test_without_until_the_window_ends_now(self):
+        gh = sample_github()
+        gh._runs.append(run(20, "failure", 10, 60))
+        gh._jobs[20] = [("Verify", "failure", 5, "Pruebas")]
+        stats = report.collect(gh, REPO, "CI", days=7, now=NOW)
+        self.assertEqual(stats.conclusive, 5)
+
+    def test_the_window_start_moves_with_until(self):
+        until = NOW - dt.timedelta(days=3)
+        text = report.render([], days=7, now=NOW, until=until)
+        self.assertIn("2026-10-04 to 2026-10-11", text)
+        self.assertIn("snapshot", text.lower())
+
+    def test_a_moment_may_be_a_date_or_a_date_and_time_in_utc(self):
+        self.assertEqual(
+            report.parse_moment("2026-10-14"),
+            dt.datetime(2026, 10, 14, 0, 0, tzinfo=dt.UTC),
+        )
+        self.assertEqual(
+            report.parse_moment("2026-10-14T11:00"),
+            dt.datetime(2026, 10, 14, 11, 0, tzinfo=dt.UTC),
+        )
+        self.assertEqual(
+            report.parse_moment("2026-10-14T11:00:00Z"),
+            dt.datetime(2026, 10, 14, 11, 0, tzinfo=dt.UTC),
+        )
+
+
 class Rendering(unittest.TestCase):
     def test_the_table_row_is_pinned(self):
         stats = report.collect(sample_github(), REPO, "CI", days=7, now=NOW)

@@ -156,14 +156,32 @@ def _parse(moment: str) -> dt.datetime:
     return dt.datetime.fromisoformat(moment)
 
 
+def parse_moment(text: str) -> dt.datetime:
+    """A date, or a date and time, read as UTC."""
+    moment = dt.datetime.fromisoformat(text)
+    return moment if moment.tzinfo else moment.replace(tzinfo=dt.UTC)
+
+
 def collect(
-    gh, repo: str, workflow: str, days: int, now: dt.datetime, sample: int = 30
+    gh,
+    repo: str,
+    workflow: str,
+    days: int,
+    now: dt.datetime,
+    sample: int = 30,
+    until: dt.datetime | None = None,
+    limit: int = 300,
 ) -> RepoStats:
-    since = now - dt.timedelta(days=days)
+    """Metrics for runs created in the `days` before `until` (default `now`).
+
+    The snapshot (runners, queue, pull requests) is always about `now`.
+    """
+    end = until or now
+    since = end - dt.timedelta(days=days)
     runs = [
         r
-        for r in gh.runs(repo, 300)
-        if r.get("workflowName") == workflow and _parse(r["createdAt"]) >= since
+        for r in gh.runs(repo, limit)
+        if r.get("workflowName") == workflow and since <= _parse(r["createdAt"]) <= end
     ]
     conclusive = [r for r in runs if r.get("conclusion") in ("success", "failure")]
     stats = RepoStats(repo=repo)
@@ -236,14 +254,25 @@ def _pct(value: float | None) -> str:
     return "-" if value is None else f"{round(value * 100)}%"
 
 
-def render(stats: list[RepoStats], days: int, now: dt.datetime) -> str:
-    since = (now - dt.timedelta(days=days)).strftime("%Y-%m-%d")
+def render(
+    stats: list[RepoStats],
+    days: int,
+    now: dt.datetime,
+    until: dt.datetime | None = None,
+) -> str:
+    end = until or now
+    since = (end - dt.timedelta(days=days)).strftime("%Y-%m-%d")
     lines = [
         "# CI health report",
         "",
         (
-            f"Period: {since} to {now.strftime('%Y-%m-%d')} ({days} days). "
+            f"Period: {since} to {end.strftime('%Y-%m-%d')} ({days} days). "
             "Conclusive runs only; cancelled runs are not failures."
+            + (
+                f" The snapshot is about now ({now.strftime('%Y-%m-%d %H:%M')} UTC)."
+                if until
+                else ""
+            )
         ),
         "",
         "| Repository | Runs | Failed | Fail rate | Infra share | Median duration | Median queue |",
@@ -284,6 +313,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", help="train repos.json: its repositories are added")
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--workflow", default="CI")
+    parser.add_argument(
+        "--until",
+        help="end of the period, UTC (2026-10-14 or 2026-10-14T11:00); default now. "
+        "Use it to reproduce a baseline after later changes.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=300,
+        help="runs read per repository (gh allows up to 1000)",
+    )
     parser.add_argument("--output", help="write the report here instead of printing it")
     args = parser.parse_args(argv)
 
@@ -297,8 +337,12 @@ def main(argv: list[str] | None = None) -> int:
 
     now = dt.datetime.now(dt.UTC)
     gh = Github()
-    stats = [collect(gh, repo, args.workflow, args.days, now) for repo in repos]
-    text = render(stats, args.days, now)
+    until = parse_moment(args.until) if args.until else None
+    stats = [
+        collect(gh, repo, args.workflow, args.days, now, until=until, limit=args.limit)
+        for repo in repos
+    ]
+    text = render(stats, args.days, now, until=until)
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
     else:
