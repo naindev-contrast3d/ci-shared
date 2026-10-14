@@ -75,8 +75,8 @@ class FakeGithub:
     def behind_by(self, repo, base, sha):
         return self._answer(self.behind, sha)
 
-    def merge(self, repo, number, sha):
-        self.calls.append(("merge", repo, number, sha))
+    def merge(self, repo, number, sha, method):
+        self.calls.append(("merge", repo, number, sha, method))
         if self.merge_error:
             raise subprocess.CalledProcessError(1, ["gh"], stderr="not allowed")
 
@@ -148,12 +148,18 @@ class Cycle(unittest.TestCase):
         gh = FakeGithub(prs=[pr(7)])
         code, _ = run(gh)
         self.assertEqual(code, 0)
-        self.assertEqual(gh.mutations(), [("merge", REPO, 7, SHA)])
+        self.assertEqual(gh.mutations(), [("merge", REPO, 7, SHA, "merge")])
+
+    def test_the_merge_method_of_the_repository_is_used(self):
+        gh = FakeGithub(prs=[pr(7)])
+        configs = [train.RepoConfig(repo=REPO, merge_method="squash")]
+        run(gh, repos=configs)
+        self.assertEqual(gh.mutations(), [("merge", REPO, 7, SHA, "squash")])
 
     def test_only_the_oldest_ready_pull_request_is_merged_per_cycle(self):
         gh = FakeGithub(prs=[pr(9, "b" * 40), pr(4, "c" * 40)])
         _, logs = run(gh)
-        self.assertEqual(gh.mutations(), [("merge", REPO, 4, "c" * 40)])
+        self.assertEqual(gh.mutations(), [("merge", REPO, 4, "c" * 40, "merge")])
         self.assertTrue(any("#9" in line and "waits" in line for line in logs))
 
     def test_a_stale_pull_request_gets_main_merged_in_and_is_not_merged(self):
@@ -167,7 +173,7 @@ class Cycle(unittest.TestCase):
 
         gh = FakeGithub(prs=[pr(2, "b" * 40), pr(5, "c" * 40)], behind=behind)
         run(gh)
-        self.assertEqual(gh.mutations(), [("merge", REPO, 5, "c" * 40)])
+        self.assertEqual(gh.mutations(), [("merge", REPO, 5, "c" * 40, "merge")])
 
     def test_only_one_stale_pull_request_is_updated_per_cycle(self):
         gh = FakeGithub(prs=[pr(2, "b" * 40), pr(5, "c" * 40)], behind=2)
@@ -203,7 +209,7 @@ class Cycle(unittest.TestCase):
         ]
         code, logs = run(gh, repos=configs)
         self.assertEqual(code, 1)
-        self.assertEqual(gh.mutations(), [("merge", "o/working", 1, SHA)])
+        self.assertEqual(gh.mutations(), [("merge", "o/working", 1, SHA, "merge")])
         self.assertTrue(any("o/broken" in line and "failed" in line for line in logs))
 
     def test_a_refused_merge_is_logged_and_reported(self):
@@ -234,6 +240,7 @@ class Config(unittest.TestCase):
         self.assertEqual(repos[0].gate_check, "Gate / Gate")
         self.assertFalse(repos[0].require_seal)
         self.assertEqual(repos[0].base, "main")
+        self.assertEqual(repos[0].merge_method, "merge")
 
     def test_overrides_are_read(self):
         _, repos = train.load_config(
@@ -262,6 +269,7 @@ class Config(unittest.TestCase):
             {"repos": [{"gate_check": "x"}]},
             {"repos": [{"repo": "no-slash"}]},
             {"repos": [{"repo": "o/r", "require_seal": "yes"}]},
+            {"repos": [{"repo": "o/r", "merge_method": "fast-forward"}]},
         ):
             with self.subTest(bad=bad), self.assertRaises(train.ConfigError):
                 train.load_config(self.write(bad))
@@ -287,8 +295,26 @@ class RealGithubCommands(unittest.TestCase):
                 return output
         return ""
 
+    def test_the_merge_method_is_read_from_the_configuration(self):
+        directory = tempfile.mkdtemp()
+        path = Path(directory) / "repos.json"
+        path.write_text(
+            json.dumps({"repos": [{"repo": "o/r", "merge_method": "squash"}]}),
+            encoding="utf-8",
+        )
+        _, repos = train.load_config(path)
+        self.assertEqual(repos[0].merge_method, "squash")
+
+    def test_each_merge_method_maps_to_its_gh_flag(self):
+        for method in ("merge", "squash", "rebase"):
+            with self.subTest(method=method):
+                self.commands.clear()
+                self.gh.merge(REPO, 5, SHA, method)
+                self.assertIn(f"--{method}", self.commands[0])
+                self.assertIn("--match-head-commit", self.commands[0])
+
     def test_merge_pins_the_head_commit_and_makes_a_merge_commit(self):
-        self.gh.merge(REPO, 5, SHA)
+        self.gh.merge(REPO, 5, SHA, "merge")
         self.assertEqual(
             self.commands[0],
             [

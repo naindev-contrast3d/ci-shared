@@ -27,7 +27,9 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   (`train/repos.example.json`), and per repository merges at most one pull request labelled
   `automerge` whose gate check is green (plus the `ci-ok/<sha>` seal when `require_seal` is set) and
   whose head contains the base branch. A stale head gets the base merged in through the API, without
-  force-push; a conflict gets `needs-human` and loses `automerge`. `--dry-run` changes nothing.
+  force-push; a conflict gets `needs-human` and loses `automerge`. `merge_method` (`merge`,
+  `squash` or `rebase`, default `merge`) follows what each repository allows. `--dry-run` changes
+  nothing.
   Tests: `python3 -m unittest discover -s tests`.
 
 - `train/install.ps1` (available): installs the train as the scheduled task `CI train`, every two
