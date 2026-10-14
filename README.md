@@ -16,9 +16,14 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   Inputs: `needs-json` (the caller's `toJSON(needs)`), `allowed-skipped`, `runs-on`. The caller
   job needs `if: ${{ always() }}`.
 
+- `changes` (available): changed-file detection inside the workflow, without `paths:` filters.
+  Inputs: `filters` (area -> glob patterns), `global-patterns` (default `.github/**`), `runs-on`.
+  Outputs: `areas` (area -> true/false) and `reason`. When the diff cannot be known with certainty
+  (no base commit, base not fetchable, empty diff, global pattern matched) every area is reported
+  as changed. Skipped jobs must be declared in the gate's `allowed-skipped`.
+
 ## Planned contents
 
-- `changes`: changed-file detection inside the workflow, without `paths:` filters.
 - `automerge`: a repository-parameterised merge train that requires a sealed head containing `main`.
 
 ## Rules
