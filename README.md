@@ -40,9 +40,12 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   the example only if missing, and `train.log`). Run it from a normal PowerShell window of the owner's
   session; `-Remove` retires the task.
 
-## Planned contents
-
-- The weekly CI health report (task T16 of the spec).
+- `report/ci_report.py` (available): the CI health report. Per repository and period it prints the
+  failure rate of conclusive runs, the share of failures caused by the infrastructure (a job that
+  never reached its steps, or the shared preflight) and not the code, the median duration and the
+  median queue time, followed by a snapshot of today: runners online, offline and busy, queued runs
+  and open pull requests. Use it to plan from the current state, not from memory:
+  `py -3 report/ci_report.py --config train/repos.json --repo Nain9Dev/crm-platform --days 7`.
 
 ## Rules
 
