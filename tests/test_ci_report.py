@@ -77,6 +77,12 @@ class FakeGithub:
     def open_prs(self, repo):
         return self._prs
 
+    def merged_prs(self, repo, limit):
+        return getattr(self, "merged", [])
+
+    def file_text(self, repo, path):
+        return getattr(self, "files", {}).get((repo, path))
+
 
 def sample_github():
     runs = [
@@ -176,6 +182,145 @@ class Metrics(unittest.TestCase):
         self.assertIsNone(stats.fail_rate)
         self.assertIsNone(stats.median_duration_s)
         self.assertIsNone(stats.median_queue_s)
+
+
+MARK = "<!-- merge-train:merged -->"
+
+
+def merged_pr(number, minutes_ago, marked):
+    comments = (
+        [{"body": f"{MARK}\nMerged by the merge train"}]
+        if marked
+        else [{"body": "lgtm"}]
+    )
+    return {"number": number, "mergedAt": iso(minutes_ago), "comments": comments}
+
+
+class MergedOutsideTheTrain(unittest.TestCase):
+    """A merged pull request without the train's mark was merged around the train (FR13)."""
+
+    def stats(self, merged, train_repos=(REPO,), train_since=None):
+        gh = sample_github()
+        gh.merged = merged
+        return report.collect(
+            gh,
+            REPO,
+            "CI",
+            days=7,
+            now=NOW,
+            train_repos=set(train_repos),
+            train_since=train_since,
+        )
+
+    def test_unmarked_merges_inside_the_window_are_counted(self):
+        stats = self.stats(
+            [merged_pr(1, 60, True), merged_pr(2, 120, False), merged_pr(3, 180, False)]
+        )
+        self.assertEqual((stats.merged_total, stats.merged_by_hand), (3, 2))
+
+    def test_merges_older_than_the_window_or_before_the_train_are_not_counted(self):
+        old = merged_pr(
+            4, 60 * 24 * 10, False
+        )  # ten days ago, outside the 7-day window
+        before_train = merged_pr(5, 60 * 24 * 3, False)
+        since = NOW - dt.timedelta(days=1)
+        stats = self.stats(
+            [old, before_train, merged_pr(6, 30, True)], train_since=since
+        )
+        self.assertEqual((stats.merged_total, stats.merged_by_hand), (1, 0))
+
+    def test_a_repository_without_the_shared_train_is_not_counted_at_all(self):
+        stats = self.stats([merged_pr(1, 60, False)], train_repos=())
+        self.assertIsNone(stats.merged_by_hand)
+        self.assertIsNone(stats.merged_total)
+
+    def test_the_snapshot_says_how_many_were_merged_around_the_train(self):
+        stats = self.stats([merged_pr(1, 60, True), merged_pr(2, 120, False)])
+        text = report.render([stats], days=7, now=NOW)
+        self.assertIn("Merged outside the train: 1 of 2", text)
+
+    def test_the_real_query_asks_for_merged_pull_requests_with_their_comments(self):
+        commands = []
+        gh = report.Github(lambda command: commands.append(command) or "[]")
+        gh.merged_prs(REPO, 100)
+        self.assertIn("merged", commands[0])
+        self.assertTrue(any("comments" in part for part in commands[0]))
+
+    def test_the_mark_is_the_same_text_the_train_writes(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "train"))
+        import automerge as train
+
+        self.assertEqual(report.TRAIN_MARK, train.MERGE_MARK)
+
+
+class TrainHealth(unittest.TestCase):
+    """The report shows whether the train is alive and runs the current script (FR14)."""
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        self.os = os
+        self.dir = Path(tempfile.mkdtemp())
+        self.gh = FakeGithub([], {})
+        self.gh.files = {
+            ("naindev-contrast3d/ci-shared", "train/automerge.py"): "script v1\n"
+        }
+
+    def write(self, name, text, minutes_ago=None):
+        path = self.dir / name
+        path.write_text(text, encoding="utf-8", newline="")
+        if minutes_ago is not None:
+            stamp = (NOW - dt.timedelta(minutes=minutes_ago)).timestamp()
+            self.os.utime(path, (stamp, stamp))
+
+    def health(self):
+        return report.train_health(self.dir, self.gh, NOW)
+
+    def test_a_recent_log_and_the_current_script_are_healthy(self):
+        self.write("train.log", "[x] heartbeat\n", minutes_ago=12)
+        self.write("automerge.py", "script v1\n")
+        health = self.health()
+        self.assertEqual(health.log_age_min, 12)
+        self.assertFalse(health.silent)
+        self.assertEqual(health.copy, "current")
+
+    def test_a_log_older_than_ninety_minutes_means_the_train_is_silent(self):
+        self.write("train.log", "[x] heartbeat\n", minutes_ago=130)
+        self.write("automerge.py", "script v1\n")
+        self.assertTrue(self.health().silent)
+
+    def test_a_copy_that_differs_from_ci_shared_main_is_stale(self):
+        self.write("train.log", "x\n", minutes_ago=5)
+        self.write("automerge.py", "script v0\n")
+        health = self.health()
+        self.assertEqual(health.copy, "stale")
+        self.assertNotEqual(health.installed_version, health.repository_version)
+
+    def test_line_endings_alone_do_not_make_a_copy_stale(self):
+        self.write("train.log", "x\n", minutes_ago=5)
+        self.write("automerge.py", "script v1\r\n")
+        self.assertEqual(self.health().copy, "current")
+
+    def test_a_missing_folder_is_reported_as_not_installed(self):
+        health = report.train_health(self.dir / "nowhere", self.gh, NOW)
+        self.assertEqual(health.copy, "missing")
+        self.assertIsNone(health.log_age_min)
+
+    def test_the_section_states_each_finding_in_words(self):
+        self.write("train.log", "x\n", minutes_ago=130)
+        self.write("automerge.py", "script v0\n")
+        text = report.render_train(self.health())
+        self.assertIn("## Merge train", text)
+        self.assertIn("no log line for 130 min", text)
+        self.assertIn("differs from ci-shared main", text)
+
+    def test_the_version_function_matches_the_trains(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "train"))
+        import automerge as train
+
+        for sample in ("a\nb\n", "a\r\nb\r\n", ""):
+            self.assertEqual(report.text_version(sample), train.text_version(sample))
 
 
 class AuditSection(unittest.TestCase):
