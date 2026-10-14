@@ -125,6 +125,12 @@ rc="$(run_compute t1 "$(head_before t1)" '{"backend":[]}')"
 rc="$(run_compute t1 "$(head_before t1)" "$filters" 'oops')"
 if [ "$rc" != 0 ] && grep -q "global-patterns is not a JSON array of strings" "$work/out"; then pass "invalid global patterns fail"; else fail "invalid global patterns fail (rc=$rc)"; fi
 
+# 13b. the reason and the areas are printed to the job log, not only to outputs
+rc="$(run_compute t3 "$(head_before t3)")"
+if grep -q "changes: diff of 2 file(s)" "$work/out" && grep -q 'changes: areas={"backend":true,"docs":true}' "$work/out"; then pass "reason and areas are logged"; else fail "reason and areas are logged"; fi
+rc="$(run_compute t6 "")"
+if grep -q "changes: no base commit" "$work/out"; then pass "fallback reason is logged"; else fail "fallback reason is logged"; fi
+
 # 14. the summary lists every area
 rc="$(run_compute t3 "$(head_before t3)")"
 if grep -q "| backend | yes |" "$work/summary" && grep -q "| docs | yes |" "$work/summary"; then pass "summary lists every area"; else fail "summary lists every area"; fi
