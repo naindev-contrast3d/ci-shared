@@ -1,0 +1,98 @@
+name: Gate
+
+# Reusable workflow: one aggregate check that is green only when every job it depends on succeeded.
+# Make this job the only required check of a repository. A job that failed or was cancelled fails
+# the gate; a job that was skipped fails it too, unless the caller declared that skip on purpose.
+#
+#   jobs:
+#     gate:
+#       if: ${{ always() }}
+#       needs: [preflight, backend, frontend]
+#       uses: naindev-contrast3d/ci-shared/.github/workflows/gate.yml@<full commit sha>
+#       with:
+#         needs-json: ${{ toJSON(needs) }}
+#         allowed-skipped: '["frontend"]'   # optional: jobs allowed to be skipped
+
+on:
+  workflow_call:
+    inputs:
+      needs-json:
+        description: The caller's `toJSON(needs)`.
+        type: string
+        required: true
+      allowed-skipped:
+        description: JSON array of job ids whose skipped result is expected and counts as success.
+        type: string
+        default: "[]"
+      runs-on:
+        description: JSON for the `runs-on` of the gate job, a label or an array of labels.
+        type: string
+        default: '"ubuntu-latest"'
+
+permissions: {}
+
+jobs:
+  gate:
+    name: Gate
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 5
+    steps:
+      - id: evaluate
+        name: Evaluate the jobs this gate depends on
+        env:
+          NEEDS_JSON: ${{ inputs.needs-json }}
+          ALLOWED_SKIPPED: ${{ inputs.allowed-skipped }}
+        run: |
+          if ! jq -e 'type == "object"' <<<"$NEEDS_JSON" >/dev/null 2>&1; then
+            echo "::error title=gate::needs-json is not valid JSON"
+            exit 1
+          fi
+          if ! jq -e 'type == "array" and all(.[]; type == "string")' <<<"$ALLOWED_SKIPPED" >/dev/null 2>&1; then
+            echo "::error title=gate::allowed-skipped is not a JSON array of strings"
+            exit 1
+          fi
+          if [ "$(jq 'length' <<<"$NEEDS_JSON")" -eq 0 ]; then
+            echo "::error title=gate::no jobs to evaluate: list them in the gate's needs"
+            exit 1
+          fi
+
+          problems=()
+          rows=()
+          while IFS=$'\t' read -r job result; do
+            job="${job%$'\r'}"
+            result="${result%$'\r'}"
+            declared="$(jq -r --arg j "$job" 'index($j) != null' <<<"$ALLOWED_SKIPPED")"
+            case "$result" in
+              success)
+                rows+=("| $job | success |")
+                ;;
+              skipped)
+                if [ "$declared" = "true" ]; then
+                  rows+=("| $job | skipped (declared) |")
+                else
+                  rows+=("| $job | skipped, not declared |")
+                  problems+=("$job: skipped without a recorded reason")
+                fi
+                ;;
+              *)
+                rows+=("| $job | $result |")
+                problems+=("$job: $result")
+                ;;
+            esac
+          done < <(jq -r 'to_entries[] | [.key, (.value.result // "unknown")] | @tsv' <<<"$NEEDS_JSON")
+
+          {
+            echo "### Gate"
+            echo
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            for r in "${rows[@]}"; do echo "$r"; done
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+          if [ "${#problems[@]}" -gt 0 ]; then
+            for p in "${problems[@]}"; do
+              echo "::error title=gate::$p"
+            done
+            exit 1
+          fi
+          echo "Gate passed: every job succeeded or was skipped on purpose."

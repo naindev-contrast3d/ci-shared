@@ -11,10 +11,13 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   runner before any build job, and labels a failure `infra`. Inputs: `runs-on`, `required-tools`,
   `min-memory-mb`, `min-disk-mb`.
 
+- `gate` (available): one aggregate job to make the only required check. It fails if any job it
+  depends on failed, was cancelled or was skipped without being declared in `allowed-skipped`.
+  Inputs: `needs-json` (the caller's `toJSON(needs)`), `allowed-skipped`, `runs-on`. The caller
+  job needs `if: ${{ always() }}`.
+
 ## Planned contents
 
-- `gate`: one aggregate job that fails if any upstream job failed, was cancelled or was skipped
-  without a recorded reason.
 - `changes`: changed-file detection inside the workflow, without `paths:` filters.
 - `automerge`: a repository-parameterised merge train that requires a sealed head containing `main`.
 
