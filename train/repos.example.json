@@ -4,7 +4,6 @@
   "repos": [
     { "repo": "naindev-contrast3d/contrast3d-platform" },
     { "repo": "naindev-contrast3d/contrast3d-bot" },
-    { "repo": "naindev-contrast3d/contrast-viewer", "require_seal": true },
-    { "repo": "naindev-contrast3d/cv-ktx2", "require_seal": true }
+    { "repo": "naindev-contrast3d/contrast-viewer" }
   ]
 }
