@@ -87,6 +87,8 @@ jobs:
 
           emit() {
             local areas="$1" reason="$2"
+            echo "changes: $reason"
+            echo "changes: areas=$areas"
             {
               echo "areas=$areas"
               echo "reason=$reason"
