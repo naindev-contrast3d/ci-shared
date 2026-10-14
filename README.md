@@ -2,12 +2,17 @@
 
 Reusable GitHub Actions workflows and a merge-train script shared by the Contrast3D repositories.
 
-Status: bootstrap. Nothing is published here yet; the design is in
-`specs/next-ci-reliability` of `naindev-contrast3d/contrast3d-platform`.
+Status: in progress. The design is in `specs/next-ci-reliability` of
+`naindev-contrast3d/contrast3d-platform`. Licensed under MIT.
+
+## Contents
+
+- `preflight` (available): checks required tools, a reachable Docker daemon, memory and disk on the
+  runner before any build job, and labels a failure `infra`. Inputs: `runs-on`, `required-tools`,
+  `min-memory-mb`, `min-disk-mb`.
 
 ## Planned contents
 
-- `preflight`: checks required tools, memory and disk on the runner before any build job.
 - `gate`: one aggregate job that fails if any upstream job failed, was cancelled or was skipped
   without a recorded reason.
 - `changes`: changed-file detection inside the workflow, without `paths:` filters.

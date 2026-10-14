@@ -1,0 +1,6 @@
+rules:
+  self-repository:
+    ignore:
+      # The documented `./` form of a local reusable workflow; the `$/` form is not used here
+      # because its support in actionlint and on GitHub was not verified.
+      - ci.yml:22
