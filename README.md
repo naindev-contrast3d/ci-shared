@@ -30,9 +30,14 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   force-push; a conflict gets `needs-human` and loses `automerge`. `--dry-run` changes nothing.
   Tests: `python3 -m unittest discover -s tests`.
 
+- `train/install.ps1` (available): installs the train as the scheduled task `CI train`, every two
+  minutes, from `D:\Development\Tools\ci-train` (a copy of `automerge.py`, a `repos.json` created from
+  the example only if missing, and `train.log`). Run it from a normal PowerShell window of the owner's
+  session; `-Remove` retires the task.
+
 ## Planned contents
 
-- Installer of the scheduled task (task T09 of the spec).
+- Queue alert in the train and the weekly CI health report (tasks T15 and T16 of the spec).
 
 ## Rules
 
