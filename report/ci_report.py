@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import importlib.util
 import json
 import statistics
 import subprocess
@@ -305,6 +306,24 @@ def render(
     return "\n".join(lines)
 
 
+def load_audit():
+    """The standards audit module, found beside this report (`../standards/audit.py`)."""
+    path = Path(__file__).resolve().parent.parent / "standards" / "audit.py"
+    spec = importlib.util.spec_from_file_location("standards_audit", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["standards_audit"] = module  # dataclasses look the module up by name
+    spec.loader.exec_module(module)
+    return module
+
+
+def audit_section(audit_text: str) -> str:
+    """The audit report as a section of this one: its title becomes a second-level heading."""
+    lines = audit_text.split("\n")
+    if lines and lines[0] == "# Standards audit":
+        lines[0] = "## Standards audit"
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -323,6 +342,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=300,
         help="runs read per repository (gh allows up to 1000)",
+    )
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="append the standards audit of the organisation",
     )
     parser.add_argument("--output", help="write the report here instead of printing it")
     args = parser.parse_args(argv)
@@ -343,6 +367,12 @@ def main(argv: list[str] | None = None) -> int:
         for repo in repos
     ]
     text = render(stats, args.days, now, until=until)
+    if args.audit:
+        audit = load_audit()
+        standard_path = Path(audit.__file__).with_name("standards.json")
+        text += "\n\n" + audit_section(
+            audit.render(audit.run(standard_path, now=now), now)
+        )
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
     else:
