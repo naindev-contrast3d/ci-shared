@@ -53,6 +53,16 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   merged outside the train since `--train-since`, and `--train-dir D:\Development\Tools\ci-train`
   adds a section on the installed train: age of its log (silent after 90 minutes) and whether its
   script differs from the one in `ci-shared` main.
+
+- `report/runner_watch.py` (available): the runner watchdog. The report says how the queue behaved
+  over a period; this says that it is wrong now. Run from a scheduled task every few minutes
+  (`py -3 report/runner_watch.py --org naindev-contrast3d --notify <path of notify.ps1>`), it reads
+  the runners of the organisation and of each private repository, plus the queued runs, and raises one
+  toast per finding: a runner offline for `--offline-min` minutes (default 10; GitHub does not say
+  since when, so the first sighting is remembered in a state file) or a run queued for `--queue-min`
+  (default 15). A finding is reported once and again only after it has cleared; `--ignore NAME` mutes
+  a runner that is offline on purpose; an unreadable answer is skipped, never reported. Exit code 1
+  when it reported something.
   `--until 2026-10-14T11:00` ends the period in the past, so a baseline can be reproduced after later
   changes; `--limit` raises the number of runs read per repository (default 300).
 
