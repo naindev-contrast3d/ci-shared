@@ -4,6 +4,7 @@
   "repos": [
     { "repo": "naindev-contrast3d/contrast3d-platform" },
     { "repo": "naindev-contrast3d/contrast3d-bot" },
-    { "repo": "naindev-contrast3d/contrast-viewer", "merge_method": "squash" }
+    { "repo": "naindev-contrast3d/contrast-viewer", "merge_method": "squash" },
+    { "repo": "naindev-contrast3d/gha-local-runners" }
   ]
 }
