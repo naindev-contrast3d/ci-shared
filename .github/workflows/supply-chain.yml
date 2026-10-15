@@ -1,0 +1,71 @@
+name: Supply chain
+
+# Reusable workflow: the scan every repository of the organisation runs, in one place. zizmor audits
+# the workflow files (online, with the job's read-only token, so `impostor-commit` can prove that each
+# pinned SHA belongs to its action's own repository) and gitleaks scans the history of the commit for
+# secrets. Both run from images pinned by digest: a tag-pinned scanner is the vector this job guards
+# against. Raising a digest is one change here, and a caller gets it by raising its pin of this file.
+#
+#   jobs:
+#     supply-chain:
+#       name: Supply chain (zizmor + gitleaks)
+#       permissions:
+#         contents: read
+#       uses: naindev-contrast3d/ci-shared/.github/workflows/supply-chain.yml@<full commit sha> # vX.Y.Z
+#       with:
+#         runs-on: '["self-hosted","linux","x64"]'   # optional, a label or an array of labels
+#
+# The runner needs Docker. A false positive of gitleaks goes in the caller's `.gitleaksignore`, by
+# fingerprint and with its reason.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: JSON for the `runs-on` of the job, a label or an array of labels.
+        type: string
+        default: '"ubuntu-latest"'
+      paths:
+        description: What zizmor audits, relative to the repository root.
+        type: string
+        default: .github/
+
+permissions: {}
+
+jobs:
+  supply-chain:
+    name: Supply chain (zizmor + gitleaks)
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: zizmor on the workflows
+        # `HOME=/tmp`: as the runner's user the image has no writable home, and zizmor caches API
+        # answers there.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUDIT_PATHS: ${{ inputs.paths }}
+        run: >-
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp
+          -e GH_TOKEN
+          -v "$GITHUB_WORKSPACE:/repo:ro" -w /repo
+          ghcr.io/zizmorcore/zizmor@sha256:a2eb396d886c053073405c7a980f2139ba2248ec172243cfa3841e57196e8101
+          --format github "$AUDIT_PATHS"
+
+      - name: gitleaks over the history of this commit
+        # `--redact`: a finding names the file, commit and rule, never the value. `safe.directory`
+        # because the mount's owner is not the container's user on every runner. `--full-history
+        # HEAD`: the history of the commit being checked, not every branch and tag.
+        if: ${{ !cancelled() }}
+        run: >-
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp
+          -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo
+          -v "$GITHUB_WORKSPACE:/repo:ro" -w /repo
+          ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git --redact --no-banner --exit-code 1 --log-opts="--full-history HEAD" .

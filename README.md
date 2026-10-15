@@ -16,6 +16,14 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   Inputs: `needs-json` (the caller's `toJSON(needs)`), `allowed-skipped`, `runs-on`. The caller
   job needs `if: ${{ always() }}`.
 
+- `supply-chain` (available): the scan every repository runs, in one place. zizmor audits the
+  workflow files online with the job's read-only token and gitleaks scans the history of the commit
+  for secrets, both from images pinned by digest, so raising a digest is one change here and a
+  caller gets it by raising its pin. Inputs: `runs-on` (a JSON label or array, default
+  `"ubuntu-latest"`) and `paths` (what zizmor audits, default `.github/`). The caller job needs
+  `permissions: contents: read`, and the runner needs Docker. `tests/supply-chain.test.sh` checks
+  that every image is pinned by digest and that the flags that decide what is scanned stay.
+
 - `changes` (available): changed-file detection inside the workflow, without `paths:` filters.
   Inputs: `filters` (area -> glob patterns), `global-patterns` (default `.github/**`), `runs-on`.
   Outputs: `areas` (area -> true/false) and `reason`. When the diff cannot be known with certainty
