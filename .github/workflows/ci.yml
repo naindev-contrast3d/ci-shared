@@ -59,37 +59,19 @@ jobs:
       - name: Changes script tests
         run: bash tests/changes.test.sh
 
+      - name: Supply-chain workflow tests
+        run: bash tests/supply-chain.test.sh
+
       - name: Merge train tests
         run: python3 -m unittest discover -s tests -p "test_*.py"
 
+  # Fixture caller of the reusable supply-chain scan, on the real event: this repository scans itself
+  # with the same file its consumers call.
   supply-chain:
-    name: Supply chain (zizmor + gitleaks)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: zizmor on the workflows
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >-
-          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp
-          -e GH_TOKEN
-          -v "$GITHUB_WORKSPACE:/repo:ro" -w /repo
-          ghcr.io/zizmorcore/zizmor@sha256:a2eb396d886c053073405c7a980f2139ba2248ec172243cfa3841e57196e8101
-          --format github .github/
-
-      - name: gitleaks over the history of this commit
-        if: ${{ !cancelled() }}
-        run: >-
-          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp
-          -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo
-          -v "$GITHUB_WORKSPACE:/repo:ro" -w /repo
-          ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
-          git --redact --no-banner --exit-code 1 --log-opts="--full-history HEAD" .
+    name: Fixture caller (supply chain)
+    permissions:
+      contents: read
+    uses: ./.github/workflows/supply-chain.yml
 
   # The only check a branch rule would need to require. Fixture caller of the reusable gate.
   gate:
