@@ -24,7 +24,7 @@ import statistics
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 RUN_FIELDS = "databaseId,conclusion,status,workflowName,createdAt,startedAt,updatedAt,event,headBranch"
@@ -73,6 +73,17 @@ class Github:
         out = self._run(
             ["gh", "run", "view", str(run_id), "--repo", repo, "--json", "jobs"]
         )
+        return json.loads(out or "{}").get("jobs", [])
+
+    def job_timings(self, repo: str, run_id: int) -> list[dict]:
+        """The jobs of a run with `created_at` (when each became ready) and `started_at`: the
+        difference is the time it waited for a runner. `gh run view` does not give the former."""
+        try:
+            out = self._run(
+                ["gh", "api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"]
+            )
+        except subprocess.CalledProcessError:
+            return []  # the run is gone or unreadable: no figure is better than a wrong one
         return json.loads(out or "{}").get("jobs", [])
 
     def runners(self, repo: str) -> list[dict]:
@@ -170,6 +181,13 @@ class RepoStats:
     # Only for repositories served by the shared merge train; None elsewhere.
     merged_total: int | None = None
     merged_by_hand: int | None = None
+    # Time each job of the sampled runs waited for a runner (created_at to started_at).
+    jobs_sampled: int = 0
+    job_wait_median_s: float | None = None
+    job_wait_p90_s: float | None = None
+    job_wait_max_s: float | None = None
+    # (job name, median wait in seconds, jobs seen), the three that waited longest.
+    slowest_jobs: list[tuple[str, float, int]] = field(default_factory=list)
 
     @property
     def fail_rate(self) -> float | None:
@@ -199,6 +217,29 @@ def _is_infra(job: dict) -> bool:
 
 def _parse(moment: str) -> dt.datetime:
     return dt.datetime.fromisoformat(moment)
+
+
+def job_waits(timings: list[dict]) -> list[tuple[str, float]]:
+    """(job name, seconds it waited for a runner) for the jobs that actually started."""
+    waits = []
+    for item in timings:
+        if item.get("conclusion") == "skipped":
+            continue
+        created, started = item.get("created_at"), item.get("started_at")
+        if not created or not started:
+            continue
+        seconds = (_parse(started) - _parse(created)).total_seconds()
+        waits.append((item.get("name") or "unnamed job", max(seconds, 0)))
+    return waits
+
+
+def percentile(values: list[float], pct: int) -> float | None:
+    """Nearest-rank percentile; None for no values."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = max(1, -(-len(ordered) * pct // 100))  # ceil without floats
+    return ordered[min(rank, len(ordered)) - 1]
 
 
 def parse_moment(text: str) -> dt.datetime:
@@ -261,6 +302,24 @@ def collect(
             waits.append((first - _parse(r["createdAt"])).total_seconds())
     if waits:
         stats.median_queue_s = statistics.median(waits)
+
+    by_job: dict[str, list[float]] = {}
+    for r in sorted(conclusive, key=lambda item: item["createdAt"], reverse=True)[
+        :sample
+    ]:
+        for name, seconds in job_waits(gh.job_timings(repo, r["databaseId"])):
+            by_job.setdefault(name, []).append(seconds)
+    every = [seconds for group in by_job.values() for seconds in group]
+    if every:
+        stats.jobs_sampled = len(every)
+        stats.job_wait_median_s = statistics.median(every)
+        stats.job_wait_p90_s = percentile(every, 90)
+        stats.job_wait_max_s = max(every)
+        ranked = sorted(
+            ((n, statistics.median(g), len(g)) for n, g in by_job.items()),
+            key=lambda item: (-item[1], item[0]),
+        )
+        stats.slowest_jobs = ranked[:3]
 
     for runner in gh.runners(repo):
         if runner.get("status") == "online":
@@ -410,6 +469,28 @@ def render(
             f"| {s.repo} | {s.conclusive} | {s.failed} | {_pct(s.fail_rate)} | {_pct(s.infra_share)}"
             f" | {fmt_duration(s.median_duration_s)} | {fmt_duration(s.median_queue_s)} |"
         )
+    if any(s.jobs_sampled for s in stats):
+        lines += [
+            "",
+            "## Queue time per job",
+            "",
+            "Time each job of the most recent runs waited for a runner, from the moment it was "
+            "ready to the moment it started. A job waits when every runner slot is taken, so a "
+            "high figure with few runners online asks for more slots; one with plenty of idle "
+            "runners points at the runner service instead.",
+            "",
+            "| Repository | Jobs | Median wait | p90 | Max | Slowest to start | Runners online |",
+            "| --- | ---: | ---: | ---: | ---: | --- | ---: |",
+        ]
+        for s in stats:
+            slowest = ", ".join(
+                f"{name} ({fmt_duration(wait)})" for name, wait, _ in s.slowest_jobs[:1]
+            )
+            lines.append(
+                f"| {s.repo} | {s.jobs_sampled} | {fmt_duration(s.job_wait_median_s)}"
+                f" | {fmt_duration(s.job_wait_p90_s)} | {fmt_duration(s.job_wait_max_s)}"
+                f" | {slowest or '-'} | {s.runners_online} |"
+            )
     lines += ["", "## Snapshot", ""]
     for s in stats:
         lines.append(f"### {s.repo}")
