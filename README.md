@@ -62,6 +62,15 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   adds a section on the installed train: age of its log (silent after 90 minutes) and whether its
   script differs from the one in `ci-shared` main.
 
+- `report/weekly_report.py` (available): the weekly report to a file. It runs `ci_report.py` over every
+  private repository of the organisation that is not archived and writes `ci-report-<date>.md` (and
+  `latest.md`) to `--out-dir`. When the week deviates, with a failure rate above 25 % over at least
+  five runs, a p90 wait for a runner above five minutes, or more than a fifth of the failures caused by
+  the infrastructure, the deviations go at the top of the report and one toast is raised through
+  `--notify`; a healthy week raises nothing. The thresholds are options. `report/install-weekly-report.ps1`
+  registers it as the task `CI weekly report` (Mondays 08:00), from a normal PowerShell window of the
+  owner's session.
+
 - `report/runner_watch.py` (available): the runner watchdog. The report says how the queue behaved
   over a period; this says that it is wrong now. Run from a scheduled task every few minutes
   (`py -3 report/runner_watch.py --org naindev-contrast3d --notify <path of notify.ps1>`), it reads
