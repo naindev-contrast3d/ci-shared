@@ -62,7 +62,10 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   since when, so the first sighting is remembered in a state file) or a run queued for `--queue-min`
   (default 15). A finding is reported once and again only after it has cleared; `--ignore NAME` mutes
   a runner that is offline on purpose; an unreadable answer is skipped, never reported. Exit code 1
-  when it reported something.
+  when it reported something. `report/install-runner-watch.ps1` registers it as the scheduled task
+  `CI runner watch` (every five minutes, hidden, the owner's `gh` login, toasts through
+  `workstation-maintenance\notify.ps1`); run it from a normal PowerShell window of the owner's
+  session, with `-Ignore <runner>` for a runner that is offline on purpose, and `-Remove` to retire it.
   `--until 2026-10-14T11:00` ends the period in the past, so a baseline can be reproduced after later
   changes; `--limit` raises the number of runs read per repository (default 300).
 
