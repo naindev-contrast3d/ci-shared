@@ -68,6 +68,9 @@ class FakeGithub:
             out.append(job(name, conclusion, started, failed_step))
         return out
 
+    def job_timings(self, repo, run_id):
+        return getattr(self, "timings", {}).get(run_id, [])
+
     def runners(self, repo):
         return self._runners
 
@@ -412,6 +415,93 @@ class Rendering(unittest.TestCase):
         self.assertEqual(report.fmt_duration(45), "45s")
         self.assertEqual(report.fmt_duration(210), "3m30s")
         self.assertEqual(report.fmt_duration(3720), "1h02m")
+
+
+def timing(name, queued_s, conclusion="success", started=True):
+    """A job from the REST API that waited `queued_s` seconds for a runner."""
+    created = NOW - dt.timedelta(hours=1)
+    began = created + dt.timedelta(seconds=queued_s)
+    stamp = "%Y-%m-%dT%H:%M:%SZ"
+    return {
+        "name": name,
+        "conclusion": conclusion,
+        "created_at": created.strftime(stamp),
+        "started_at": began.strftime(stamp) if started else None,
+    }
+
+
+class JobQueueTime(unittest.TestCase):
+    def test_a_job_waits_from_its_creation_to_its_start(self):
+        waits = report.job_waits([timing("Verify", 45), timing("Seal", 780)])
+        self.assertEqual(waits, [("Verify", 45), ("Seal", 780)])
+
+    def test_skipped_and_never_started_jobs_do_not_count(self):
+        jobs = [timing("A", 0, "skipped"), timing("B", 0, None, started=False)]
+        self.assertEqual(report.job_waits(jobs), [])
+
+    def test_a_clock_skew_never_gives_a_negative_wait(self):
+        self.assertEqual(report.job_waits([timing("A", -3)]), [("A", 0)])
+
+    def test_the_percentile_is_the_nearest_rank(self):
+        values = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+        self.assertEqual(report.percentile(values, 90), 90)
+        self.assertEqual(report.percentile(values, 50), 50)
+        self.assertEqual(report.percentile([7], 90), 7)
+        self.assertIsNone(report.percentile([], 90))
+
+    def test_the_report_gives_median_p90_max_and_the_slowest_jobs(self):
+        gh = sample_github()
+        gh.timings = {
+            1: [timing("Verify", 10), timing("Seal", 780)],
+            2: [timing("Verify", 20), timing("Seal", 600)],
+            3: [timing("Verify", 30), timing("Seal", 900)],
+        }
+        stats = report.collect(gh, REPO, "CI", days=7, now=NOW)
+        self.assertEqual(stats.jobs_sampled, 6)
+        self.assertEqual(stats.job_wait_max_s, 900)
+        self.assertEqual(stats.job_wait_p90_s, 900)
+        self.assertEqual(stats.job_wait_median_s, 315)  # 10, 20, 30, 600, 780, 900
+        self.assertEqual(stats.slowest_jobs[0], ("Seal", 780, 3))
+
+    def test_a_repository_without_timings_has_no_queue_figures(self):
+        stats = report.collect(sample_github(), REPO, "CI", days=7, now=NOW)
+        self.assertEqual(stats.jobs_sampled, 0)
+        self.assertIsNone(stats.job_wait_median_s)
+        self.assertEqual(stats.slowest_jobs, [])
+
+    def test_the_section_names_the_slowest_job_and_the_runner_count(self):
+        gh = sample_github()
+        gh.timings = {1: [timing("Verify", 10), timing("Seal", 780)]}
+        stats = report.collect(gh, REPO, "CI", days=7, now=NOW)
+        text = report.render([stats], days=7, now=NOW)
+        self.assertIn("## Queue time per job", text)
+        self.assertIn(
+            f"| {REPO} | 2 | 6m35s | 13m00s | 13m00s | Seal (13m00s) | 1 |", text
+        )
+
+    def test_the_section_is_left_out_when_no_repository_has_timings(self):
+        stats = report.collect(sample_github(), REPO, "CI", days=7, now=NOW)
+        self.assertNotIn(
+            "## Queue time per job", report.render([stats], days=7, now=NOW)
+        )
+
+    def test_the_real_command_reads_the_jobs_of_the_run_with_their_creation_time(self):
+        calls = []
+
+        def fake(command):
+            calls.append(command)
+            return json.dumps({"jobs": [timing("Seal", 5)]})
+
+        jobs = report.Github(fake).job_timings(REPO, 42)
+        self.assertEqual(jobs[0]["name"], "Seal")
+        self.assertEqual(calls[0][:2], ["gh", "api"])
+        self.assertIn(f"repos/{REPO}/actions/runs/42/jobs", " ".join(calls[0]))
+
+    def test_a_run_whose_jobs_cannot_be_read_gives_no_timings(self):
+        def refuse(command):
+            raise subprocess.CalledProcessError(1, command, stderr="HTTP 404")
+
+        self.assertEqual(report.Github(refuse).job_timings(REPO, 42), [])
 
 
 class RealCommands(unittest.TestCase):
