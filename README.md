@@ -90,7 +90,11 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   `standards/standards.json` and prints each deviation as `error`, `warning` or `info`: branch
   deletion after merge, Dependabot, CODEOWNERS, secret scanning and a recognised license on public
   repositories, a CI that calls the shared gate pinned by a full SHA with a `# vX.Y.Z` comment, too
-  many leftover branches, and the organisation's two-factor requirement. An exception names a
+  many leftover branches, the organisation's two-factor requirement, Dependabot alerts that are off
+  or open past their deadline (critical 7, high 30, medium 90 days, only when a fix exists),
+  writable deploy keys, webhooks without a secret, an unprotected default branch on public
+  repositories, and an organisation that does not restrict actions to a list pinned by SHA. The
+  audit only reports; the owner changes keys, webhooks and two-factor. An exception names a
   repository and a rule, gives a reason and expires; an expired one is itself an error.
   `py -3 standards/audit.py [--fail-on error]`, or `report/ci_report.py --audit` to append it to the
   weekly report.

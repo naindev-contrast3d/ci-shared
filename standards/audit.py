@@ -11,8 +11,13 @@ Severities: `error` breaks a guarantee, `warning` is hygiene, `info` is an obser
 Rules (per repository unless noted): delete-branch-on-merge, dependabot-config, codeowners,
 secret-scanning (public repositories, where it is free), license (public repositories),
 has-ci, shared-gate, gate-pin (the shared gate is pinned by a full commit SHA with a vX.Y.Z comment,
-which is what online zizmor verifies), topic-branches, and for the organisation org-2fa and
-org-2fa-method. Archived repositories are skipped.
+which is what online zizmor verifies), topic-branches, dependabot-alerts (off) and
+dependabot-overdue (an open alert with a patched version past its deadline, 7/30/90 days for
+critical/high/medium, `dependency_deadline_days` overrides), deploy-key-write, webhook-secret,
+branch-protection (public repositories, where it is free), and for the organisation org-2fa,
+org-2fa-method and actions-allowlist (actions restricted to a list and pinned by SHA). The audit
+only reports: deploy keys, webhooks and two-factor are the owner's to change. Archived
+repositories are skipped.
 """
 
 from __future__ import annotations
@@ -44,7 +49,17 @@ DEFAULT_SEVERITY = {
     "shared-gate": "warning",
     "topic-branches": "warning",
     "org-2fa-method": "warning",
+    "dependabot-alerts": "warning",
+    "dependabot-overdue": "warning",
+    "branch-protection": "warning",
+    "deploy-key-write": "warning",
+    "webhook-secret": "info",
+    "actions-allowlist": "warning",
 }
+
+# Days an open alert with a patched version may stay open, by severity (spec org-security-baseline
+# FR1). `dependency_deadline_days` in the standard overrides it; a missing severity has no deadline.
+DEFAULT_DEADLINE_DAYS = {"critical": 7, "high": 30, "medium": 90}
 
 
 class StandardError(ValueError):
@@ -145,6 +160,48 @@ class Github:
             return []  # needs organisation owner rights
         return [member["login"] for member in json.loads(out or "[]")]
 
+    def org_actions_permissions(self, org: str) -> dict:
+        try:
+            return json.loads(self._run(["gh", "api", f"orgs/{org}/actions/permissions"]) or "{}")
+        except subprocess.CalledProcessError:
+            return {}  # needs organisation owner rights
+
+    def dependabot_alerts(self, full_name: str) -> list[dict] | None:
+        """Open alerts, or None when Dependabot alerts are disabled or cannot be read."""
+        try:
+            out = self._run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{full_name}/dependabot/alerts?state=open&per_page=100",
+                    "--paginate",
+                    "--slurp",
+                ]
+            )
+        except subprocess.CalledProcessError:
+            return None
+        pages = json.loads(out or "[]")
+        return [item for page in pages for item in page] if pages and isinstance(pages[0], list) else pages
+
+    def branch_protected(self, full_name: str, branch: str) -> bool:
+        try:
+            self._run(["gh", "api", f"repos/{full_name}/branches/{branch}/protection"])
+        except subprocess.CalledProcessError:
+            return False
+        return True
+
+    def deploy_keys(self, full_name: str) -> list[dict]:
+        try:
+            return json.loads(self._run(["gh", "api", f"repos/{full_name}/keys"]) or "[]")
+        except subprocess.CalledProcessError:
+            return []
+
+    def hooks(self, full_name: str) -> list[dict]:
+        try:
+            return json.loads(self._run(["gh", "api", f"repos/{full_name}/hooks"]) or "[]")
+        except subprocess.CalledProcessError:
+            return []
+
 
 def validate_standard(standard: dict) -> None:
     for rule, severity in standard.get("severity", {}).items():
@@ -208,17 +265,59 @@ def audit(gh, standard: dict, now: dt.datetime) -> list[Finding]:
             "org-2fa-method",
             "members with an insecure second factor: " + ", ".join(insecure),
         )
+    permissions = gh.org_actions_permissions(org)
+    if permissions and (
+        permissions.get("allowed_actions") != "selected"
+        or not permissions.get("sha_pinning_required")
+    ):
+        add(
+            org,
+            "actions-allowlist",
+            "actions are not restricted to a list or not pinned by SHA "
+            f"(allowed_actions={permissions.get('allowed_actions')}, "
+            f"sha_pinning_required={bool(permissions.get('sha_pinning_required'))})",
+        )
 
     for repo in gh.org_repos(org):
         if repo.get("archived"):
             continue
         full = repo["full_name"]
         public = not repo.get("private", True)
-        _audit_repo(gh, standard, repo, full, public, add)
+        _audit_repo(gh, standard, repo, full, public, now, add)
     return findings
 
 
-def _audit_repo(gh, standard: dict, repo: dict, full: str, public: bool, add) -> None:
+def _audit_security(gh, standard: dict, full: str, now: dt.datetime, add) -> None:
+    deadlines = {**DEFAULT_DEADLINE_DAYS, **standard.get("dependency_deadline_days", {})}
+    alerts = gh.dependabot_alerts(full)
+    if alerts is None:
+        add(full, "dependabot-alerts", "Dependabot alerts are disabled or cannot be read")
+    for item in alerts or []:
+        patched = (item.get("security_vulnerability") or {}).get("first_patched_version")
+        level = (item.get("security_advisory") or {}).get("severity")
+        if not patched or level not in deadlines:
+            continue  # nothing to upgrade to yet, or a severity without a deadline
+        opened = dt.datetime.fromisoformat(item["created_at"].replace("Z", "+00:00"))
+        age = (now - opened).days
+        if age > deadlines[level]:
+            package = ((item.get("dependency") or {}).get("package") or {}).get("name", "?")
+            add(
+                full,
+                "dependabot-overdue",
+                f"{level} alert on `{package}` open {age} days, a fix exists "
+                f"(deadline {deadlines[level]} days)",
+            )
+    for key in gh.deploy_keys(full):
+        if not key.get("read_only", True):
+            add(full, "deploy-key-write", f"deploy key `{key.get('title', '?')}` can write")
+    for hook in gh.hooks(full):
+        if hook.get("active") and not (hook.get("config") or {}).get("secret"):
+            add(full, "webhook-secret", "an active webhook has no secret (the URL is the credential)")
+
+
+def _audit_repo(
+    gh, standard: dict, repo: dict, full: str, public: bool, now: dt.datetime, add
+) -> None:
     if not repo.get("delete_branch_on_merge"):
         add(
             full,
@@ -267,7 +366,15 @@ def _audit_repo(gh, standard: dict, repo: dict, full: str, public: bool, add) ->
         spdx = (repo.get("license") or {}).get("spdx_id")
         if spdx in (None, "NOASSERTION"):
             add(full, "license", "GitHub does not recognise the license")
+        branch = repo.get("default_branch", "main")
+        if not gh.branch_protected(full, branch):
+            add(
+                full,
+                "branch-protection",
+                f"`{branch}` is not protected (free on public repositories)",
+            )
 
+    _audit_security(gh, standard, full, now, add)
     _audit_gate(gh, workflow_names, full, add)
 
     limit = standard.get("max_topic_branches", 8)

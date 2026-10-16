@@ -46,7 +46,18 @@ def repo(
 
 class FakeGithub:
     def __init__(
-        self, repos, files=None, dirs=None, branches=None, two_fa=True, insecure=()
+        self,
+        repos,
+        files=None,
+        dirs=None,
+        branches=None,
+        two_fa=True,
+        insecure=(),
+        alerts=None,
+        protected=True,
+        keys=None,
+        hooks=None,
+        actions=None,
     ):
         self._repos = repos
         self._files = files or {}
@@ -54,9 +65,33 @@ class FakeGithub:
         self._branches = branches or {}
         self._two_fa = two_fa
         self._insecure = list(insecure)
+        self._alerts = alerts or {}
+        self._protected = protected
+        self._keys = keys or {}
+        self._hooks = hooks or {}
+        self._actions = (
+            {"allowed_actions": "selected", "sha_pinning_required": True}
+            if actions is None
+            else actions
+        )
 
     def org(self, org):
         return {"two_factor_requirement_enabled": self._two_fa}
+
+    def org_actions_permissions(self, org):
+        return self._actions
+
+    def dependabot_alerts(self, full_name):
+        return self._alerts.get(full_name, [])
+
+    def branch_protected(self, full_name, branch):
+        return self._protected
+
+    def deploy_keys(self, full_name):
+        return self._keys.get(full_name, [])
+
+    def hooks(self, full_name):
+        return self._hooks.get(full_name, [])
 
     def org_repos(self, org):
         return self._repos
@@ -243,6 +278,90 @@ class Rules(unittest.TestCase):
         self.assertIn("david", org_findings[0].message)
 
 
+def alert(severity, days_old, patched="1.2.3", package="left-pad"):
+    created = NOW - dt.timedelta(days=days_old)
+    return {
+        "created_at": created.isoformat().replace("+00:00", "Z"),
+        "dependency": {"package": {"name": package}},
+        "security_advisory": {"severity": severity},
+        "security_vulnerability": {
+            "first_patched_version": {"identifier": patched} if patched else None
+        },
+    }
+
+
+class SecurityRules(unittest.TestCase):
+    def world(self, **kw):
+        files, dirs = good_files("app")
+        return FakeGithub([repo("app")], files, dirs, **kw)
+
+    def test_disabled_dependabot_alerts_are_a_warning(self):
+        gh = self.world(alerts={f"{ORG}/app": None})
+        findings = audit.audit(gh, standard(), NOW)
+        self.assertEqual(rules(findings), {"dependabot-alerts"})
+        self.assertEqual(findings[0].severity, "warning")
+
+    def test_an_alert_inside_its_deadline_is_not_a_finding(self):
+        gh = self.world(alerts={f"{ORG}/app": [alert("critical", 6), alert("high", 29)]})
+        self.assertEqual(audit.audit(gh, standard(), NOW), [])
+
+    def test_an_alert_past_its_deadline_names_the_package_and_the_age(self):
+        gh = self.world(alerts={f"{ORG}/app": [alert("critical", 9, package="happy-dom")]})
+        findings = audit.audit(gh, standard(), NOW)
+        self.assertEqual(rules(findings), {"dependabot-overdue"})
+        self.assertIn("happy-dom", findings[0].message)
+        self.assertIn("9 days", findings[0].message)
+
+    def test_an_alert_without_a_patched_version_is_never_overdue(self):
+        gh = self.world(alerts={f"{ORG}/app": [alert("high", 400, patched=None)]})
+        self.assertEqual(audit.audit(gh, standard(), NOW), [])
+
+    def test_the_deadlines_come_from_the_standard(self):
+        gh = self.world(alerts={f"{ORG}/app": [alert("medium", 20)]})
+        std = standard(dependency_deadline_days={"medium": 10})
+        self.assertEqual(rules(audit.audit(gh, std, NOW)), {"dependabot-overdue"})
+
+    def test_a_public_repository_must_protect_its_default_branch(self):
+        files, dirs = good_files("lib")
+        gh = FakeGithub([repo("lib", private=False)], files, dirs, protected=False)
+        self.assertEqual(rules(audit.audit(gh, standard(), NOW), "lib"), {"branch-protection"})
+
+    def test_a_private_repository_is_not_asked_for_paid_branch_protection(self):
+        self.assertEqual(audit.audit(self.world(protected=False), standard(), NOW), [])
+
+    def test_a_writable_deploy_key_is_listed_by_title_without_key_material(self):
+        key = {"title": "release-tags", "read_only": False, "key": "ssh-ed25519 AAAA"}
+        gh = self.world(keys={f"{ORG}/app": [key, {"title": "ro", "read_only": True}]})
+        findings = audit.audit(gh, standard(), NOW)
+        self.assertEqual(rules(findings), {"deploy-key-write"})
+        self.assertIn("release-tags", findings[0].message)
+        self.assertNotIn("AAAA", findings[0].message)
+        self.assertEqual(len(findings), 1)
+
+    def test_a_webhook_without_a_secret_is_an_observation(self):
+        hook = {"active": True, "config": {"url": "https://discord.com/api/webhooks/x"}}
+        gh = self.world(hooks={f"{ORG}/app": [hook]})
+        findings = audit.audit(gh, standard(), NOW)
+        self.assertEqual(rules(findings), {"webhook-secret"})
+        self.assertEqual(findings[0].severity, "info")
+        self.assertNotIn("discord.com/api", findings[0].message)
+
+    def test_a_webhook_with_a_secret_is_fine(self):
+        hook = {"active": True, "config": {"url": "https://x.example/h", "secret": "********"}}
+        self.assertEqual(
+            audit.audit(self.world(hooks={f"{ORG}/app": [hook]}), standard(), NOW), []
+        )
+
+    def test_actions_must_be_restricted_and_pinned_by_sha(self):
+        gh = self.world(actions={"allowed_actions": "all", "sha_pinning_required": False})
+        findings = audit.audit(gh, standard(), NOW)
+        self.assertEqual({f.rule for f in findings}, {"actions-allowlist"})
+        self.assertEqual(len(findings), 1)
+
+    def test_unreadable_actions_permissions_are_skipped(self):
+        self.assertEqual(audit.audit(self.world(actions={}), standard(), NOW), [])
+
+
 class Exceptions(unittest.TestCase):
     def finding_world(self):
         files, dirs = good_files("app")
@@ -374,6 +493,33 @@ class RealCommands(unittest.TestCase):
     def test_insecure_two_factor_members_are_listed_by_login(self):
         self.outputs["2fa_insecure"] = json.dumps([{"login": "david"}])
         self.assertEqual(self.gh.insecure_two_factor_members(ORG), ["david"])
+
+    def test_disabled_dependabot_alerts_read_as_none(self):
+        self.errors["dependabot/alerts"] = "Dependabot alerts are disabled"
+        self.assertIsNone(self.gh.dependabot_alerts(f"{ORG}/app"))
+
+    def test_open_alerts_are_flattened_across_pages(self):
+        self.outputs["dependabot/alerts"] = json.dumps([[{"a": 1}], [{"a": 2}]])
+        self.assertEqual(self.gh.dependabot_alerts(f"{ORG}/app"), [{"a": 1}, {"a": 2}])
+        self.assertIn("state=open", " ".join(self.commands[0]))
+
+    def test_an_unprotected_branch_reads_as_false(self):
+        self.errors["branches/main/protection"] = "Branch not protected"
+        self.assertFalse(self.gh.branch_protected(f"{ORG}/app", "main"))
+
+    def test_a_protected_branch_reads_as_true(self):
+        self.outputs["branches/main/protection"] = "{}"
+        self.assertTrue(self.gh.branch_protected(f"{ORG}/app", "main"))
+
+    def test_keys_and_hooks_that_cannot_be_read_are_empty(self):
+        self.errors["/keys"] = "HTTP 403"
+        self.errors["/hooks"] = "HTTP 403"
+        self.assertEqual(self.gh.deploy_keys(f"{ORG}/app"), [])
+        self.assertEqual(self.gh.hooks(f"{ORG}/app"), [])
+
+    def test_actions_permissions_that_cannot_be_read_are_empty(self):
+        self.errors["actions/permissions"] = "HTTP 403"
+        self.assertEqual(self.gh.org_actions_permissions(ORG), {})
 
 
 if __name__ == "__main__":
