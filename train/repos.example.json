@@ -2,9 +2,9 @@
   "label": "automerge",
   "needs_human_label": "needs-human",
   "repos": [
-    { "repo": "naindev-contrast3d/contrast3d-platform" },
-    { "repo": "naindev-contrast3d/contrast3d-bot" },
-    { "repo": "naindev-contrast3d/contrast-viewer", "merge_method": "squash" },
-    { "repo": "naindev-contrast3d/gha-local-runners" }
+    { "repo": "your-org/service-a" },
+    { "repo": "your-org/service-b" },
+    { "repo": "your-org/web-app", "merge_method": "squash" },
+    { "repo": "your-org/tooling" }
   ]
 }

@@ -2,8 +2,7 @@
 
 Reusable GitHub Actions workflows and a merge-train script shared by the Contrast3D repositories.
 
-Status: in progress. The design is in `specs/next-ci-reliability` of
-`naindev-contrast3d/contrast3d-platform`. Licensed under MIT.
+Status: in progress. The design is kept in the maintainers' own repository. Licensed under MIT.
 
 ## Contents
 
@@ -47,7 +46,7 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   Tests: `python3 -m unittest discover -s tests`.
 
 - `train/install.ps1` (available): installs the train as the scheduled task `CI train`, every two
-  minutes, from `D:\Development\Tools\ci-train` (a copy of `automerge.py`, a `repos.json` created from
+  minutes, from its install directory (`-Destination`; a copy of `automerge.py`, a `repos.json` created from
   the example only if missing, and `train.log`). Run it from a normal PowerShell window of the owner's
   session; `-Remove` retires the task.
 
@@ -56,9 +55,9 @@ Status: in progress. The design is in `specs/next-ci-reliability` of
   never reached its steps, or the shared preflight) and not the code, the median duration and the
   median queue time, followed by a snapshot of today: runners online, offline and busy, queued runs
   and open pull requests. Use it to plan from the current state, not from memory:
-  `py -3 report/ci_report.py --config train/repos.json --repo naindev-contrast3d/contrast-hub --days 7`.
+  `py -3 report/ci_report.py --config train/repos.json --repo <owner>/<repo> --days 7`.
   For the repositories of `--config` (the shared train) the snapshot also counts the pull requests
-  merged outside the train since `--train-since`, and `--train-dir D:\Development\Tools\ci-train`
+  merged outside the train since `--train-since`, and `--train-dir <install directory>`
   adds a section on the installed train: age of its log (silent after 90 minutes) and whether its
   script differs from the one in `ci-shared` main.
 

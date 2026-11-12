@@ -6,7 +6,7 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File train\install.ps1 -Remove
 #
 # The script is copied to $Destination, so the task does not depend on which branch a checkout is
-# on (the crm-platform train learned this the hard way). Run this again after automerge.py changes.
+# on (learned the hard way). Run this again after automerge.py changes.
 # repos.json is created from repos.example.json only when it does not exist; it is never overwritten.
 # The task uses the owner's `gh` login; nothing else is stored.
 param(
@@ -28,7 +28,7 @@ gh auth status *> $null
 if ($LASTEXITCODE -ne 0) { throw 'gh is not signed in: run gh auth login' }
 
 # The real pythonw.exe, not the `pyw` launcher: under the task scheduler the launcher exited with
-# code 2 and wrote nothing (crm-platform, 30/09/2026), while the interpreter itself runs fine.
+# code 2 and wrote nothing, while the interpreter itself runs fine.
 $python = (py -3 -c "import sys;print(sys.executable)")
 $pythonw = Join-Path (Split-Path $python) 'pythonw.exe'
 if (-not (Test-Path $pythonw)) { throw "pythonw.exe not found at $pythonw" }

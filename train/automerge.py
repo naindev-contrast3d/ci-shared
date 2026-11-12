@@ -59,7 +59,7 @@ class RepoConfig:
     gate_check: str = "Gate / Gate"
     require_seal: bool = False
     base: str = "main"
-    # How `gh pr merge` merges; a repository may allow only some methods (contrast-viewer: squash).
+    # How `gh pr merge` merges; a repository may allow only some methods (for example only squash).
     merge_method: str = "merge"
 
 
