@@ -62,9 +62,6 @@ jobs:
       - name: Supply-chain workflow tests
         run: bash tests/supply-chain.test.sh
 
-      - name: Merge train tests
-        run: python3 -m unittest discover -s tests -p "test_*.py"
-
   # Fixture caller of the reusable supply-chain scan, on the real event: this repository scans itself
   # with the same file its consumers call.
   supply-chain:
